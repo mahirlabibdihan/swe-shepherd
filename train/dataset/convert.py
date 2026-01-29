@@ -19,18 +19,16 @@ def extract_prm_steps(example):
     history = []
 
     for msg in example:
-        if msg["role"] == "assistant":
-            steps.append({
-                "messages": history.copy(),
-                "response": msg["content"],
-                "reward": msg["reward"]
-            })
-
         history.append({
             "role": msg["role"],
             "content": msg["content"]
         })
-
+        if msg["role"] == "assistant":
+            steps.append({
+                "messages": history.copy(),
+                # "response": msg["content"],
+                "reward": msg["reward"]
+            })
     return steps
 
 prm_train = []
