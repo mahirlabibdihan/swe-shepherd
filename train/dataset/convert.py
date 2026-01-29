@@ -14,24 +14,52 @@ def serialize_history(history):
             text += f"<|assistant|>\n{content}\n"
     return text
 
-def convert_to_axolotl_regression(steps):
+# def convert_to_axolotl_regression(steps):
+#     axolotl_data = []
+    
+#     for step in steps:
+#         history_text = ""
+#         for msg in step["messages"]:
+#             role = msg["role"].capitalize()
+#             content = msg["content"]
+#             history_text += f"{role}: {content}\n"
+            
+#         training_text = history_text + "Score:"
+            
+#         axolotl_data.append({
+#             "text": training_text,
+#             "reward": float(step["reward"])
+#         })
+             
+#     return axolotl_data   
+
+def convert_to_axolotl_regression(steps, k=3):
     axolotl_data = []
     
     for step in steps:
-        history_text = ""
-        for msg in step["messages"]:
-            role = msg["role"].capitalize()
-            content = msg["content"]
-            history_text += f"{role}: {content}\n"
+        msgs = step["messages"]
+        
+        if len(msgs) > (k + 2):
+            # Keep System + First User, then add marker, then last k
+            truncated_messages = msgs[0:2]
+            # Use a role-neutral dictionary or just a string depending on your loop
+            history_text = ""
+            for msg in truncated_messages:
+                history_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
             
-        training_text = history_text + "Score:"
+            history_text += "\n[... Several conversational turns omitted for brevity ...]\n\n"
             
+            for msg in msgs[-k:]:
+                history_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
+        else:
+            history_text = "".join([f"{m['role'].capitalize()}: {m['content']}\n" for m in msgs])
+
         axolotl_data.append({
-            "text": training_text,
+            "text": history_text + "Score:",
             "reward": float(step["reward"])
         })
              
-    return axolotl_data   
+    return axolotl_data
 
 def extract_prm_steps(example):
     steps = []
