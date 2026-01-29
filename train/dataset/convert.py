@@ -78,18 +78,18 @@ def extract_prm_steps(example):
             })
             
     # Truncate long histories in each step
-    for step in steps:
-        msgs = step["messages"]
-        if len(msgs) > (k + 2):
-            truncated_messages = msgs[0:2]
-            truncated_messages.append({
-                "role": "system",
-                "content": "[... Several conversational turns omitted for brevity ...]"
-            })
-            truncated_messages.extend(msgs[-k:])
-            step["messages"] = truncated_messages
+    # for step in steps:
+    #     msgs = step["messages"]
+    #     if len(msgs) > (k + 2):
+    #         truncated_messages = msgs[0:2]
+    #         truncated_messages.append({
+    #             "role": "system",
+    #             "content": "[... Several conversational turns omitted for brevity ...]"
+    #         })
+    #         truncated_messages.extend(msgs[-k:])
+    #         step["messages"] = truncated_messages
         
-    return steps
+    return convert_to_axolotl_regression(steps)
 
 import json
 
