@@ -121,10 +121,11 @@ class DefaultAgent:
                 # Remove oldest non-system message and retry
                 for i, msg in enumerate(msgs[2:]):
                     if msg["role"] != "system":
-                        del msgs[i]
+                        del msgs[i + 2]
                         if not flag:
                             msgs.insert(2, truncation_notice)
                             flag = True
+                        break
         
         # save msg to json file
         with open("last_agent_messages.json", "w", encoding="utf-8") as f:
