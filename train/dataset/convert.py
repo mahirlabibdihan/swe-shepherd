@@ -14,6 +14,25 @@ def serialize_history(history):
             text += f"<|assistant|>\n{content}\n"
     return text
 
+def convert_to_axolotl_regression(steps):
+    axolotl_data = []
+    
+    for step in steps:
+        history_text = ""
+        for msg in step["messages"]:
+            role = msg["role"].capitalize()
+            content = msg["content"]
+            history_text += f"{role}: {content}\n"
+            
+        training_text = history_text + "Score:"
+            
+        axolotl_data.append({
+            "text": training_text,
+            "reward": float(step["reward"])
+        })
+             
+    return axolotl_data   
+
 def extract_prm_steps(example):
     steps = []
     history = []
@@ -29,7 +48,11 @@ def extract_prm_steps(example):
                 # "response": msg["content"],
                 "reward": msg["reward"]
             })
-    return steps
+    return convert_to_axolotl_regression(steps)
+
+import json
+
+
 
 prm_train = []
 
