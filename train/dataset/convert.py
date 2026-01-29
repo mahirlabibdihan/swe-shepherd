@@ -83,12 +83,13 @@ for step in prm_test:
     step["reward"] = normalize_score(step["reward"])
     
 # split into train and validation
-import random
-random.seed(42)
-random.shuffle(prm_train)
-split_idx = int(0.9 * len(prm_train))
-prm_val = prm_train[split_idx:]
-prm_train = prm_train[:split_idx]
+# import random
+# random.seed(42)
+# random.shuffle(prm_train)
+# split_idx = int(0 * len(prm_train))
+prm_val = []
+# prm_val = prm_train[split_idx:]
+# prm_train = prm_train[:split_idx]
 
 # save to prm_train.jsonl, prm_val.jsonl, prm_test.jsonl
 def save_jsonl(dataset, path):
