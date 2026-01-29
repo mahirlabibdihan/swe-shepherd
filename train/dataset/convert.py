@@ -33,7 +33,7 @@ def serialize_history(history):
              
 #     return axolotl_data   
 
-def convert_to_axolotl_regression(steps, k=3):
+def convert_to_axolotl_regression(steps, k=5):
     axolotl_data = []
     
     for step in steps:
