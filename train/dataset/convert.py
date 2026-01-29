@@ -1,4 +1,5 @@
 import json
+import os
 
 def serialize_history(history):
     text = ""
@@ -17,7 +18,7 @@ def extract_prm_steps(example):
     steps = []
     history = []
 
-    for msg in example["messages"]:
+    for msg in example:
         if msg["role"] == "assistant":
             steps.append({
                 "messages": history.copy(),
@@ -96,7 +97,25 @@ def save_jsonl(dataset, path):
     with open(path, "w") as f:
         for item in dataset:
             f.write(json.dumps(item) + "\n")
-            
-save_jsonl(prm_train, "prm_train.jsonl")
-save_jsonl(prm_val, "prm_val.jsonl")
-save_jsonl(prm_test, "prm_test.jsonl")
+     
+import argparse
+
+def main():
+    parser = argparse.ArgumentParser(description="Save datasets as JSONL files.")
+    parser.add_argument(
+        "--base_dir",
+        type=str,
+        default=".",
+        help="Directory where JSONL files will be saved (default: current directory)"
+    )
+    args = parser.parse_args()
+
+    base_dir = args.base_dir
+    os.makedirs(base_dir, exist_ok=True)  # make sure directory exists
+
+    save_jsonl(prm_train, os.path.join(base_dir, "prm_train.jsonl"))
+    save_jsonl(prm_val, os.path.join(base_dir, "prm_val.jsonl"))
+    save_jsonl(prm_test, os.path.join(base_dir, "prm_test.jsonl"))
+    
+if __name__ == "__main__":
+    main()
