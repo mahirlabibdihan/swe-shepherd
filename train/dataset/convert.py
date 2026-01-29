@@ -69,8 +69,6 @@ for ex in verified_dataset:
     prm_test.extend(steps)
 
 print(f"Total PRM steps: {len(prm_train)}")
-print(prm_train[0])
-
 
 train_rewards = [step["reward"] for step in prm_train]
 r_min, r_max = min(train_rewards), max(train_rewards)
