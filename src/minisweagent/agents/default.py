@@ -125,7 +125,12 @@ class DefaultAgent:
                         if not flag:
                             msgs.insert(2, truncation_notice)
                             flag = True
-
+        
+        # save msg to json file
+        with open("last_agent_messages.json", "w", encoding="utf-8") as f:
+            import json
+            json.dump(msgs + [response], f, indent=2)
+            
         self.add_message("assistant", **response)
         return response
 
