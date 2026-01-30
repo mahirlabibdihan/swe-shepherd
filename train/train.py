@@ -38,13 +38,12 @@ class PRMDataset(Dataset):
         self.tok = tokenizer
         self.max_len = max_len
 
-        for ex in hf_dataset:
-            for step in ex:
-                hist = step["history"][-k:]
-                task = step["problem_statement"]
-                text = self.format(task, hist, step["action"], len(step["history"])-k)
-                label = step["reward"]
-                self.samples.append((text, label))
+        for step in hf_dataset:
+            hist = step["history"][-k:]
+            task = step["problem_statement"]
+            text = self.format(task, hist, step["action"], len(step["history"])-k)
+            label = step["reward"]
+            self.samples.append((text, label))
 
     def format(self, task, history, action, offset):
         parts = []
