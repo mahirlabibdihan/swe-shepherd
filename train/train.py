@@ -39,6 +39,11 @@ class PRMDataset(Dataset):
         self.max_len = max_len
 
         for step in hf_dataset:
+            hist = step["history"][-k:]
+            task = step["problem_statement"]
+            text = self.format(task, hist, step["action"], len(step["history"])-k)
+            label = step["reward"]
+            
             n_tokens = len(
                 tokenizer(
                     text,
@@ -48,10 +53,7 @@ class PRMDataset(Dataset):
             )
             if n_tokens > max_len:
                 continue  # drop sample
-            hist = step["history"][-k:]
-            task = step["problem_statement"]
-            text = self.format(task, hist, step["action"], len(step["history"])-k)
-            label = step["reward"]
+            
             self.samples.append((text, label))
 
     def format(self, task, history, action, offset):
