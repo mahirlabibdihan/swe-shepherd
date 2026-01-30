@@ -100,7 +100,9 @@ class DefaultAgent:
     def step(self) -> dict:
         """Query the LM, execute the action, return the observation."""
         if self.config.n_actions == 1:
-            return self.get_observation(self.query())
+            response = self.query()
+            self.add_message("assistant", **response)
+            return self.get_observation(response)
         else:
             best_response = None
             max_score = float('-inf')
@@ -118,6 +120,7 @@ class DefaultAgent:
                     best_response = response
                 
             output = self.get_observation(best_response)
+            self.add_message("assistant", **best_response)
             return output
 
     def query(self) -> dict:
@@ -154,7 +157,6 @@ class DefaultAgent:
             import json
             json.dump(msgs + [response], f, indent=2)
             
-        self.add_message("assistant", **response)
         return response
 
     def get_observation(self, response: dict) -> dict:
