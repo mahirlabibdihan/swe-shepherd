@@ -143,8 +143,11 @@ class PRM(nn.Module):
             output_hidden_states=True
         )
 
-        h = out.hidden_states[-1][:, -1].float()
-        return self.value_head(h).squeeze(-1)
+        h = out.hidden_states[-1][:, -1]
+
+        self.value_head = self.value_head.to(h.device)
+
+        return self.value_head(h.float()).squeeze(-1)
 
     def save(self, save_dir: str):
         os.makedirs(save_dir, exist_ok=True)
