@@ -226,7 +226,7 @@ def main():
     import torch.nn.functional as F
     import matplotlib.pyplot as plt
 
-    num_epochs = 3
+    num_epochs = 5
     train_losses, val_losses = [], []
 
     for epoch in range(num_epochs):
@@ -280,6 +280,17 @@ def main():
     
     # Save the model
     model.save("prm_ckpt")
+    
+    
+    plt.figure(figsize=(8,5))
+    plt.plot(range(1, num_epochs+1), train_losses, label='Train Loss', marker='o')
+    plt.plot(range(1, num_epochs+1), val_losses, label='Val Loss', marker='o')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("loss_curve.png", dpi=300, bbox_inches="tight")
         
 if __name__ == "__main__":
     main()
