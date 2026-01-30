@@ -112,7 +112,7 @@ class DefaultAgent:
                     "action": response["content"]
                 })
                 score = output.json().get("score", 0.0)
-                print(f"Action score #{_+1}: {score}")
+                # print(f"Action score #{_+1}: {score}")
                 if score > max_score:
                     max_score = score
                     best_response = response
