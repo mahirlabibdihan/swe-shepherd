@@ -152,6 +152,8 @@ class DefaultAgent:
                 break
             except OpenHFContextLengthExceededError as e:
                 self.n_history -= 1
+                if self.n_history < 0:
+                    raise RuntimeError("Model context length too small to fit system and instance messages.")
 
         # save msg to json file
         with open("last_agent_messages.json", "w", encoding="utf-8") as f:
