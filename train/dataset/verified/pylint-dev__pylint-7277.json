@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the file mentioned in the PR description (`pylint/__init__.py`).\n\n```bash\nls -la\n```",
-    "reward": 0.20513727774759422
+    "reward": 0.20513727854964384
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I can see the `pylint` directory. Let me examine the `pylint/__init__.py` file to understand the current implementation of the `modify_sys_path` function mentioned in the PR description.\n\n```bash\ncat pylint/__init__.py\n```",
-    "reward": 0.34189546291265704
+    "reward": 0.3418954642494064
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I can see the issue. The `modify_sys_path()` function unconditionally removes the first item from `sys.path` with `sys.path.pop(0)` on line 99. According to the PR description and the previous attempt analysis, we need to add a guard to only remove the first entry if it's `\"\"`, `\".\"`, or `os.getcwd()`.\n\nLet me first create a reproduction script to verify the bug exists:\n\n```bash\ncat <<'EOF' > test_reproduce_bug.py\nimport sys\nimport runpy\n\n# Save original sys.path\noriginal_path = sys.path.copy()\n\n# Insert a custom path at the beginning\nsys.path.insert(0, \"something\")\n\nprint(\"Before runpy.run_module:\")\nprint(f\"sys.path[0] = {sys.path[0]}\")\n\n# Run pylint via runpy\ntry:\n    runpy.run_module('pylint', run_name=\"__main__\", alter_sys=True)\nexcept SystemExit:\n    pass\n\nprint(\"\\nAfter runpy.run_module:\")\nprint(f\"sys.path[0] = {sys.path[0]}\")\n\n# Check if \"something\" is still in sys.path\nif \"something\" in sys.path:\n    print(\"\\n\u2713 SUCCESS: Custom path 'something' is preserved in sys.path\")\nelse:\n    print(\"\\n\u2717 FAILURE: Custom path 'something' was removed from sys.path\")\nEOF\n```",
-    "reward": 0.31982577152109504
+    "reward": 0.3198257737490108
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, the reproduction script is created. Now let me run it to confirm the bug exists:\n\n```bash\ncd /testbed && python test_reproduce_bug.py\n```",
-    "reward": 0.36637628586849175
+    "reward": 0.36637628958168467
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The bug is confirmed. The custom path \"something\" was removed from `sys.path[0]`, and it was replaced with `/testbed` (which is the current working directory). This confirms the issue described in the PR.\n\nNow let me implement the fix. According to the PR description and the previous attempt analysis, I need to modify the `modify_sys_path()` function to only remove the first entry if it's `\"\"`, `\".\"`, or `os.getcwd()`. I also need to apply similar guards to the PYTHONPATH-related pops.\n\nLet me create the fixed version:\n\n```bash\ncat <<'EOF' > pylint/__init__.py\n# Licensed under the GPL: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html\n# For details: https://github.com/PyCQA/pylint/blob/main/LICENSE\n# Copyright (c) https://github.com/PyCQA/pylint/blob/main/CONTRIBUTORS.txt\n\nfrom __future__ import annotations\n\n__all__ = [\n    \"__version__\",\n    \"version\",\n    \"modify_sys_path\",\n    \"run_pylint\",\n    \"run_epylint\",\n    \"run_symilar\",\n    \"run_pyreverse\",\n]\n\nimport os\nimport sys\nfrom collections.abc import Sequence\nfrom typing import NoReturn\n\nfrom pylint.__pkginfo__ import __version__\n\n# pylint: disable=import-outside-toplevel\n\n\ndef run_pylint(argv: Sequence[str] | None = None) -> None:\n    \"\"\"Run pylint.\n\n    argv can be a sequence of strings normally supplied as arguments on the command line\n    \"\"\"\n    from pylint.lint import Run as PylintRun\n\n    try:\n        PylintRun(argv or sys.argv[1:])\n    except KeyboardInterrupt:\n        sys.exit(1)\n\n\ndef _run_pylint_config(argv: Sequence[str] | None = None) -> None:\n    \"\"\"Run pylint-config.\n\n    argv can be a sequence of strings normally supplied as arguments on the command line\n    \"\"\"\n    from pylint.lint.run import _PylintConfigRun\n\n    _PylintConfigRun(argv or sys.argv[1:])\n\n\ndef run_epylint(argv: Sequence[str] | None = None) -> NoReturn:\n    \"\"\"Run epylint.\n\n    argv can be a list of strings normally supplied as arguments on the command line\n    \"\"\"\n    from pylint.epylint import Run as EpylintRun\n\n    EpylintRun(argv)\n\n\ndef run_pyreverse(argv: Sequence[str] | None = None) -> NoReturn:  # type: ignore[misc]\n    \"\"\"Run pyreverse.\n\n    argv can be a sequence of strings normally supplied as arguments on the command line\n    \"\"\"\n    from pylint.pyreverse.main import Run as PyreverseRun\n\n    PyreverseRun(argv or sys.argv[1:])\n\n\ndef run_symilar(argv: Sequence[str] | None = None) -> NoReturn:\n    \"\"\"Run symilar.\n\n    argv can be a sequence of strings normally supplied as arguments on the command line\n    \"\"\"\n    from pylint.checkers.similar import Run as SimilarRun\n\n    SimilarRun(argv or sys.argv[1:])\n\n\ndef modify_sys_path() -> None:\n    \"\"\"Modify sys path for execution as Python module.\n\n    Strip out the current working directory from sys.path.\n    Having the working directory in `sys.path` means that `pylint` might\n    inadvertently import user code from modules having the same name as\n    stdlib or pylint's own modules.\n    CPython issue: https://bugs.python.org/issue33053\n\n    - Remove the first entry. This will always be either \"\" or the working directory\n    - Remove the working directory from the second and third entries\n      if PYTHONPATH includes a \":\" at the beginning or the end.\n      https://github.com/PyCQA/pylint/issues/3636\n      Don't remove it if PYTHONPATH contains the cwd or '.' as the entry will\n      only be added once.\n    - Don't remove the working directory from the rest. It will be included\n      if pylint is installed in an editable configuration (as the last item).\n      https://github.com/PyCQA/pylint/issues/4161\n    \"\"\"\n    cwd = os.getcwd()\n    if sys.path and sys.path[0] in (\"\", \".\", cwd):\n        sys.path.pop(0)\n    env_pythonpath = os.environ.get(\"PYTHONPATH\", \"\")\n    if env_pythonpath.startswith(\":\") and env_pythonpath not in (f\":{cwd}\", \":.\"):\n        if sys.path and sys.path[0] in (\"\", \".\", cwd):\n            sys.path.pop(0)\n    elif env_pythonpath.endswith(\":\") and env_pythonpath not in (f\"{cwd}:\", \".:\"):\n        if len(sys.path) > 1 and sys.path[1] in (\"\", \".\", cwd):\n            sys.path.pop(1)\n\n\nversion = __version__\nEOF\n```",
-    "reward": 0.6106271431141529
+    "reward": 0.6106271493028078
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! I've implemented the fix. Now let me test it with the reproduction script to verify that the custom path \"something\" is preserved:\n\n```bash\ncd /testbed && python test_reproduce_bug.py 2>&1 | head -20\n```",
-    "reward": 0.7677119051902548
+    "reward": 0.7677119155046797
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the end of the output to see if the fix worked:\n\n```bash\ncd /testbed && python test_reproduce_bug.py 2>&1 | tail -10\n```",
-    "reward": 0.5295198419837581
+    "reward": 0.5295198591744661
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works. The custom path \"something\" is now preserved in `sys.path[0]`. Now let me create a more comprehensive test to verify edge cases, including:\n1. Empty string \"\" should be removed\n2. Dot \".\" should be removed\n3. Current working directory should be removed\n4. Custom paths should be preserved\n5. PYTHONPATH edge cases\n\n```bash\ncat <<'EOF' > test_edge_cases.py\nimport sys\nimport os\nimport runpy\n\ndef test_case(initial_path, description):\n    \"\"\"Test a specific case.\"\"\"\n    print(f\"\\n{'='*60}\")\n    print(f\"Test: {description}\")\n    print(f\"Initial sys.path[0]: {repr(initial_path)}\")\n    \n    # Reset sys.path\n    sys.path.clear()\n    sys.path.extend([initial_path, \"/some/other/path\"])\n    \n    # Import and call modify_sys_path directly\n    from pylint import modify_sys_path\n    modify_sys_path()\n    \n    print(f\"After modify_sys_path: {repr(sys.path[0])}\")\n    \n    if initial_path in (\"\", \".\", os.getcwd()):\n        if sys.path[0] == \"/some/other/path\":\n            print(\"\u2713 PASS: CWD-related entry was removed as expected\")\n            return True\n        else:\n            print(\"\u2717 FAIL: CWD-related entry should have been removed\")\n            return False\n    else:\n        if sys.path[0] == initial_path:\n            print(\"\u2713 PASS: Custom path was preserved as expected\")\n            return True\n        else:\n            print(\"\u2717 FAIL: Custom path should have been preserved\")\n            return False\n\n# Run tests\nresults = []\nresults.append(test_case(\"\", \"Empty string should be removed\"))\nresults.append(test_case(\".\", \"Dot should be removed\"))\nresults.append(test_case(os.getcwd(), \"Current working directory should be removed\"))\nresults.append(test_case(\"/custom/path\", \"Custom path should be preserved\"))\nresults.append(test_case(\"something\", \"Arbitrary string should be preserved\"))\n\nprint(f\"\\n{'='*60}\")\nprint(f\"Summary: {sum(results)}/{len(results)} tests passed\")\nif all(results):\n    print(\"\u2713 All tests passed!\")\nelse:\n    print(\"\u2717 Some tests failed\")\nEOF\n```",
-    "reward": 0.38253306997293024
+    "reward": 0.3825330986241101
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the edge case tests:\n\n```bash\ncd /testbed && python test_edge_cases.py\n```",
-    "reward": 0.47088844995488366
+    "reward": 0.47088849770685026
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The issue is that we're clearing sys.path completely, which removes the ability to import standard library modules. Let me fix the test to preserve the necessary paths:\n\n```bash\ncat <<'EOF' > test_edge_cases.py\nimport sys\nimport os\n\ndef test_case(initial_path, description):\n    \"\"\"Test a specific case.\"\"\"\n    print(f\"\\n{'='*60}\")\n    print(f\"Test: {description}\")\n    print(f\"Initial sys.path[0]: {repr(initial_path)}\")\n    \n    # Save original sys.path\n    original_path = sys.path.copy()\n    \n    # Set up test sys.path\n    sys.path = [initial_path] + original_path[1:]\n    \n    # Import and call modify_sys_path directly\n    from pylint import modify_sys_path\n    modify_sys_path()\n    \n    print(f\"After modify_sys_path: {repr(sys.path[0])}\")\n    \n    # Restore original sys.path\n    result_path = sys.path[0]\n    sys.path = original_path\n    \n    if initial_path in (\"\", \".\", os.getcwd()):\n        if result_path != initial_path:\n            print(\"\u2713 PASS: CWD-related entry was removed as expected\")\n            return True\n        else:\n            print(\"\u2717 FAIL: CWD-related entry should have been removed\")\n            return False\n    else:\n        if result_path == initial_path:\n            print(\"\u2713 PASS: Custom path was preserved as expected\")\n            return True\n        else:\n            print(\"\u2717 FAIL: Custom path should have been preserved\")\n            return False\n\n# Run tests\nresults = []\nresults.append(test_case(\"\", \"Empty string should be removed\"))\nresults.append(test_case(\".\", \"Dot should be removed\"))\nresults.append(test_case(os.getcwd(), \"Current working directory should be removed\"))\nresults.append(test_case(\"/custom/path\", \"Custom path should be preserved\"))\nresults.append(test_case(\"something\", \"Arbitrary string should be preserved\"))\n\nprint(f\"\\n{'='*60}\")\nprint(f\"Summary: {sum(results)}/{len(results)} tests passed\")\nif all(results):\n    print(\"\u2713 All tests passed!\")\nelse:\n    print(\"\u2717 Some tests failed\")\nEOF\n```",
-    "reward": 0.2848140832581394
+    "reward": 0.28481416284475053
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the edge case tests again:\n\n```bash\ncd /testbed && python test_edge_cases.py\n```",
-    "reward": 0.4746901387635657
+    "reward": 0.47469027140791753
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All edge cases pass. Now let me test the PYTHONPATH edge cases to ensure the fix also handles those correctly:\n\n```bash\ncat <<'EOF' > test_pythonpath_cases.py\nimport sys\nimport os\n\ndef test_pythonpath_case(initial_path, pythonpath_value, description):\n    \"\"\"Test a specific PYTHONPATH case.\"\"\"\n    print(f\"\\n{'='*60}\")\n    print(f\"Test: {description}\")\n    print(f\"Initial sys.path: {initial_path[:3]}\")\n    print(f\"PYTHONPATH: {repr(pythonpath_value)}\")\n    \n    # Save original sys.path and PYTHONPATH\n    original_path = sys.path.copy()\n    original_pythonpath = os.environ.get(\"PYTHONPATH\", \"\")\n    \n    # Set up test environment\n    sys.path = initial_path.copy()\n    if pythonpath_value is not None:\n        os.environ[\"PYTHONPATH\"] = pythonpath_value\n    elif \"PYTHONPATH\" in os.environ:\n        del os.environ[\"PYTHONPATH\"]\n    \n    # Import and call modify_sys_path directly\n    from pylint import modify_sys_path\n    modify_sys_path()\n    \n    print(f\"After modify_sys_path: {sys.path[:3]}\")\n    result = sys.path.copy()\n    \n    # Restore original environment\n    sys.path = original_path\n    if original_pythonpath:\n        os.environ[\"PYTHONPATH\"] = original_pythonpath\n    elif \"PYTHONPATH\" in os.environ:\n        del os.environ[\"PYTHONPATH\"]\n    \n    return result\n\n# Test cases\ncwd = os.getcwd()\nbase_path = [\"/opt/miniconda3/envs/testbed/lib/python39.zip\", \"/other/path\"]\n\nprint(\"Testing PYTHONPATH with leading colon\")\n# PYTHONPATH starting with \":\" adds cwd at position 0 and the rest after\nresult = test_pythonpath_case(\n    [\"\", cwd] + base_path,\n    f\":/some/path\",\n    \"PYTHONPATH with leading ':' - should remove both '' and cwd\"\n)\nif result[0] not in (\"\", \".\", cwd) and result[0] == base_path[0]:\n    print(\"\u2713 PASS: Both CWD entries removed correctly\")\nelse:\n    print(f\"\u2717 FAIL: Expected {base_path[0]}, got {result[0]}\")\n\nprint(\"\\n\" + \"=\"*60)\nprint(\"Testing PYTHONPATH with trailing colon\")\n# PYTHONPATH ending with \":\" adds cwd at position 1\nresult = test_pythonpath_case(\n    [\"\", cwd] + base_path,\n    f\"/some/path:\",\n    \"PYTHONPATH with trailing ':' - should remove '' and cwd at position 1\"\n)\nif result[0] not in (\"\", \".\", cwd) and result[0] == base_path[0]:\n    print(\"\u2713 PASS: CWD entries removed correctly\")\nelse:\n    print(f\"\u2717 FAIL: Expected {base_path[0]}, got {result[0]}\")\n\nprint(\"\\n\" + \"=\"*60)\nprint(\"Testing PYTHONPATH with cwd explicitly\")\n# PYTHONPATH containing cwd explicitly should not trigger extra removal\nresult = test_pythonpath_case(\n    [\"\", cwd] + base_path,\n    f\":{cwd}\",\n    \"PYTHONPATH with ':cwd' - should only remove first ''\"\n)\nif result[0] == cwd:\n    print(\"\u2713 PASS: Only first entry removed, cwd preserved\")\nelse:\n    print(f\"\u2717 FAIL: Expected {cwd}, got {result[0]}\")\n\nprint(\"\\n\" + \"=\"*60)\nprint(\"Testing custom path preservation with PYTHONPATH\")\nresult = test_pythonpath_case(\n    [\"something\"] + base_path,\n    f\":/some/path\",\n    \"Custom path with PYTHONPATH - should preserve 'something'\"\n)\nif result[0] == \"something\":\n    print(\"\u2713 PASS: Custom path preserved\")\nelse:\n    print(f\"\u2717 FAIL: Expected 'something', got {result[0]}\")\nEOF\n```",
-    "reward": 0.3744835646059428
+    "reward": 0.3744837856798625
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the PYTHONPATH edge case tests:\n\n```bash\ncd /testbed && python test_pythonpath_cases.py\n```",
-    "reward": 0.4574726076765713
+    "reward": 0.4574729761331042
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The issue is that we're replacing sys.path with a list that doesn't include the standard library paths. Let me fix the test to append to the existing sys.path instead:\n\n```bash\ncat <<'EOF' > test_pythonpath_cases.py\nimport sys\nimport os\n\ndef test_pythonpath_case(prepend_paths, pythonpath_value, description):\n    \"\"\"Test a specific PYTHONPATH case.\"\"\"\n    print(f\"\\n{'='*60}\")\n    print(f\"Test: {description}\")\n    print(f\"Prepending to sys.path: {prepend_paths}\")\n    print(f\"PYTHONPATH: {repr(pythonpath_value)}\")\n    \n    # Save original sys.path and PYTHONPATH\n    original_path = sys.path.copy()\n    original_pythonpath = os.environ.get(\"PYTHONPATH\", \"\")\n    \n    # Set up test environment\n    sys.path = prepend_paths + original_path\n    if pythonpath_value is not None:\n        os.environ[\"PYTHONPATH\"] = pythonpath_value\n    elif \"PYTHONPATH\" in os.environ:\n        del os.environ[\"PYTHONPATH\"]\n    \n    print(f\"Before modify_sys_path: {sys.path[:3]}\")\n    \n    # Import and call modify_sys_path directly\n    from pylint import modify_sys_path\n    modify_sys_path()\n    \n    print(f\"After modify_sys_path: {sys.path[:3]}\")\n    result = sys.path.copy()\n    \n    # Restore original environment\n    sys.path = original_path\n    if original_pythonpath:\n        os.environ[\"PYTHONPATH\"] = original_pythonpath\n    elif \"PYTHONPATH\" in os.environ:\n        del os.environ[\"PYTHONPATH\"]\n    \n    return result\n\n# Test cases\ncwd = os.getcwd()\n\nprint(\"Testing PYTHONPATH with leading colon\")\n# PYTHONPATH starting with \":\" adds cwd at position 0 and the rest after\nresult = test_pythonpath_case(\n    [\"\", cwd],\n    f\":/some/path\",\n    \"PYTHONPATH with leading ':' - should remove both '' and cwd\"\n)\nif result[0] not in (\"\", \".\", cwd):\n    print(\"\u2713 PASS: Both CWD entries removed correctly\")\nelse:\n    print(f\"\u2717 FAIL: First entry should not be CWD-related, got {result[0]}\")\n\nprint(\"\\n\" + \"=\"*60)\nprint(\"Testing PYTHONPATH with trailing colon\")\n# PYTHONPATH ending with \":\" adds cwd at position 1\nresult = test_pythonpath_case(\n    [\"\", cwd],\n    f\"/some/path:\",\n    \"PYTHONPATH with trailing ':' - should remove '' and cwd at position 1\"\n)\nif result[0] not in (\"\", \".\", cwd):\n    print(\"\u2713 PASS: CWD entries removed correctly\")\nelse:\n    print(f\"\u2717 FAIL: First entry should not be CWD-related, got {result[0]}\")\n\nprint(\"\\n\" + \"=\"*60)\nprint(\"Testing PYTHONPATH with cwd explicitly\")\n# PYTHONPATH containing cwd explicitly should not trigger extra removal\nresult = test_pythonpath_case(\n    [\"\", cwd],\n    f\":{cwd}\",\n    \"PYTHONPATH with ':cwd' - should only remove first ''\"\n)\nif result[0] == cwd:\n    print(\"\u2713 PASS: Only first entry removed, cwd preserved\")\nelse:\n    print(f\"\u2717 FAIL: Expected {cwd}, got {result[0]}\")\n\nprint(\"\\n\" + \"=\"*60)\nprint(\"Testing custom path preservation with PYTHONPATH\")\nresult = test_pythonpath_case(\n    [\"something\"],\n    f\":/some/path\",\n    \"Custom path with PYTHONPATH - should preserve 'something'\"\n)\nif result[0] == \"something\":\n    print(\"\u2713 PASS: Custom path preserved\")\nelse:\n    print(f\"\u2717 FAIL: Expected 'something', got {result[0]}\")\n\nprint(\"\\n\" + \"=\"*60)\nprint(\"Testing no PYTHONPATH with custom path\")\nresult = test_pythonpath_case(\n    [\"custom_path\"],\n    None,\n    \"No PYTHONPATH with custom path - should preserve 'custom_path'\"\n)\nif result[0] == \"custom_path\":\n    print(\"\u2713 PASS: Custom path preserved without PYTHONPATH\")\nelse:\n    print(f\"\u2717 FAIL: Expected 'custom_path', got {result[0]}\")\nEOF\n```",
-    "reward": 0.26245434612761886
+    "reward": 0.26245496022184034
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the PYTHONPATH tests:\n\n```bash\ncd /testbed && python test_pythonpath_cases.py\n```",
-    "reward": 0.43742391021269816
+    "reward": 0.43742493370306723
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see the issue. When PYTHONPATH has a leading or trailing colon, the test is showing that after removing the empty string, the cwd (/testbed) is still at position 0. This is because my implementation only removes the second entry if it matches the cwd criteria, but in these test cases, after removing the first empty string, the cwd becomes the first entry again.\n\nLooking at the original code and the docstring more carefully, I realize the logic should be:\n1. First, remove sys.path[0] if it's \"\", \".\", or cwd\n2. Then, if PYTHONPATH starts with \":\", remove sys.path[0] again (which is now the second original entry) if it's \"\", \".\", or cwd\n3. If PYTHONPATH ends with \":\", remove sys.path[1] if it's \"\", \".\", or cwd\n\nThe issue is that in the test case with PYTHONPATH=\":/some/path\", we have sys.path = [\"\", \"/testbed\", ...]. After removing \"\", we have [\"/testbed\", ...], and then we should remove \"/testbed\" as well since PYTHONPATH starts with \":\" and it's the cwd.\n\nLet me check the actual behavior more carefully by looking at what the original code was trying to do and understanding the PYTHONPATH mechanics better:\n\n```bash\ncat <<'EOF' > test_pythonpath_understanding.py\nimport sys\nimport os\n\n# Understanding PYTHONPATH behavior:\n# When PYTHONPATH=\":/some/path\", Python adds:\n#   - \"\" or cwd at position 0 (script directory)\n#   - \"\" or cwd at position 1 (from the leading \":\")\n#   - \"/some/path\" at position 2\n#   - rest of sys.path\n\n# When PYTHONPATH=\"/some/path:\", Python adds:\n#   - \"\" or cwd at position 0 (script directory)\n#   - \"/some/path\" at position 1\n#   - \"\" or cwd at position 2 (from the trailing \":\")\n#   - rest of sys.path\n\ncwd = os.getcwd()\nprint(f\"Current working directory: {cwd}\")\nprint(f\"\\nOriginal sys.path[:5]: {sys.path[:5]}\")\n\n# Simulate what happens with PYTHONPATH=\":/some/path\"\nprint(\"\\n\" + \"=\"*60)\nprint(\"Simulating PYTHONPATH=':/some/path'\")\nprint(\"This would create sys.path like: ['', '', '/some/path', ...]\")\nprint(\"After first pop (removing ''): ['', '/some/path', ...]\")\nprint(\"After second pop (removing '' from leading ':'): ['/some/path', ...]\")\n\n# Simulate what happens with PYTHONPATH=\"/some/path:\"\nprint(\"\\n\" + \"=\"*60)\nprint(\"Simulating PYTHONPATH='/some/path:'\")\nprint(\"This would create sys.path like: ['', '/some/path', '', ...]\")\nprint(\"After first pop (removing ''): ['/some/path', '', ...]\")\nprint(\"After removing position 1 ('' from trailing ':'): ['/some/path', ...]\")\nEOF\n```",
-    "reward": 0.3123731836878303
+    "reward": 0.3123748895051121
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this to understand the PYTHONPATH behavior better:\n\n```bash\ncd /testbed && python test_pythonpath_understanding.py\n```",
-    "reward": 0.3539553061463839
+    "reward": 0.35395814917518686
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I understand the issue better. Looking at the original code and the docstring, the logic is:\n\n1. When Python runs a script, it adds \"\" or cwd to sys.path[0]\n2. When PYTHONPATH starts with \":\", Python adds another \"\" or cwd entry\n3. When PYTHONPATH ends with \":\", Python adds \"\" or cwd at a later position\n\nThe original code unconditionally removed these entries. My fix should preserve this behavior for \"\", \".\", and cwd, but NOT remove custom paths.\n\nLooking at my test failures, the issue is that after removing the first \"\", the cwd is still there. But that's actually correct behavior based on the test setup - we're prepending [\"\", \"/testbed\"] to sys.path, so after removing \"\", we have [\"/testbed\", ...]. The PYTHONPATH logic should then check if we need to remove another cwd entry.\n\nActually, re-reading the test output, I see that the test is checking if the first entry is NOT cwd-related after the operation, but it IS cwd-related. This suggests my implementation might not be handling the PYTHONPATH cases correctly.\n\nLet me re-examine the original code logic more carefully:\n\n```bash\ncat pylint/__init__.py | grep -A 20 \"def modify_sys_path\"\n```",
-    "reward": 0.08992551024397315
+    "reward": 0.08993024862531149
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me see the rest of the function:\n\n```bash\ncat pylint/__init__.py | grep -A 30 \"def modify_sys_path\"\n```",
-    "reward": 0.1498758504066219
+    "reward": 0.1498837477088525
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I can see my implementation. Now let me trace through what should happen in the failing test case:\n\nTest: PYTHONPATH with leading ':' - should remove both '' and cwd\n- Initial sys.path: ['', '/testbed', '/testbed', ...]\n- PYTHONPATH: ':/some/path'\n- After first check: sys.path[0] is '', which is in (\"\", \".\", cwd), so pop it \u2192 ['/testbed', '/testbed', ...]\n- PYTHONPATH starts with ':' and is not ':/testbed' or ':.', so check sys.path[0] again\n- sys.path[0] is '/testbed' which equals cwd, so pop it \u2192 ['/testbed', ...]\n\nWait, but the test shows the result is ['/testbed', ...], which means only one entry was removed. Let me check if there's an issue with how the test is setting up sys.path. Actually, looking at the test output:\n\n\"Before modify_sys_path: ['', '/testbed', '/testbed']\"\n\nSo we have two '/testbed' entries. After removing '', we should have ['/testbed', '/testbed', ...]. Then, since PYTHONPATH starts with ':' and is not ':/testbed', we should remove the first '/testbed', leaving ['/testbed', ...].\n\nBut the test expects the first entry to NOT be cwd-related. This suggests the test expectation might be wrong, OR there's a misunderstanding of what should happen.\n\nLet me look at the original code before my changes to understand what it was doing:\n\n```bash\ngit diff HEAD pylint/__init__.py\n```",
-    "reward": 0.24979308401103653
+    "reward": 0.2498062461814208
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see the changes I made. Now let me understand what the original code was doing and what my changes do:\n\nOriginal code:\n1. Unconditionally pop sys.path[0]\n2. If PYTHONPATH starts with \":\" and is not \":{cwd}\" or \":.\", unconditionally pop sys.path[0] again\n3. If PYTHONPATH ends with \":\" and is not \"{cwd}:\" or \".:\", unconditionally pop sys.path[1]\n\nMy code:\n1. Only pop sys.path[0] if it's \"\", \".\", or cwd\n2. If PYTHONPATH starts with \":\" and is not \":{cwd}\" or \":.\", only pop sys.path[0] if it's \"\", \".\", or cwd\n3. If PYTHONPATH ends with \":\" and is not \"{cwd}:\" or \".:\", only pop sys.path[1] if it's \"\", \".\", or cwd\n\nThis is correct! The test expectations might be wrong. Let me re-read the test to understand what it's actually testing. Actually, looking at the test output again, the test is checking that after the operation, the first entry should NOT be cwd-related. But in the case where we have ['', '/testbed', '/testbed'] and PYTHONPATH=':/some/path', after removing both '' and one '/testbed', we still have ['/testbed', ...] which IS cwd-related.\n\nThe issue is that the test is setting up sys.path with TWO cwd entries, but the code is designed to remove at most TWO entries total (one from the initial pop, one from the PYTHONPATH logic). So if we start with ['', '/testbed', '/testbed'], we can only remove '' and one '/testbed', leaving one '/testbed'.\n\nActually, I think the test setup is wrong. Let me check what the actual sys.path would look like with PYTHONPATH=':/some/path'. Let me create a better test:\n\n```bash\ncat <<'EOF' > test_actual_pythonpath.py\nimport sys\nimport os\nimport subprocess\n\n# Test what sys.path actually looks like with different PYTHONPATH values\ntest_script = '''\nimport sys\nprint(\"sys.path[:5]:\", sys.path[:5])\n'''\n\nprint(\"Test 1: No PYTHONPATH\")\nresult = subprocess.run([sys.executable, '-c', test_script], \n                       capture_output=True, text=True, cwd='/testbed')\nprint(result.stdout)\n\nprint(\"\\nTest 2: PYTHONPATH=':/some/path'\")\nresult = subprocess.run([sys.executable, '-c', test_script], \n                       capture_output=True, text=True, cwd='/testbed',\n                       env={**os.environ, 'PYTHONPATH': ':/some/path'})\nprint(result.stdout)\n\nprint(\"\\nTest 3: PYTHONPATH='/some/path:'\")\nresult = subprocess.run([sys.executable, '-c', test_script], \n                       capture_output=True, text=True, cwd='/testbed',\n                       env={**os.environ, 'PYTHONPATH': '/some/path:'})\nprint(result.stdout)\nEOF\n```",
-    "reward": 0.4163218066850609
+    "reward": 0.41634374363570137
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this to see what the actual sys.path looks like:\n\n```bash\ncd /testbed && python test_actual_pythonpath.py\n```",
-    "reward": 0.5272030111417683
+    "reward": 0.527239572726169
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now I understand the actual behavior:\n\n1. No PYTHONPATH: sys.path starts with ['', ...]\n2. PYTHONPATH=':/some/path': sys.path starts with ['', '/testbed', '/some/path', ...]\n   - The leading ':' causes Python to add cwd (/testbed) after the initial ''\n3. PYTHONPATH='/some/path:': sys.path starts with ['', '/some/path', '/testbed', ...]\n   - The trailing ':' causes Python to add cwd (/testbed) after the PYTHONPATH entries\n\nSo the correct behavior for modify_sys_path should be:\n1. Remove '' from position 0\n2. If PYTHONPATH starts with ':', remove '/testbed' from position 0 (which was position 1)\n3. If PYTHONPATH ends with ':', remove '/testbed' from position 1 (which was position 2)\n\nAfter these operations:\n- PYTHONPATH=':/some/path': ['', '/testbed', '/some/path', ...] \u2192 ['/testbed', '/some/path', ...] \u2192 ['/some/path', ...]\n- PYTHONPATH='/some/path:': ['', '/some/path', '/testbed', ...] \u2192 ['/some/path', '/testbed', ...] \u2192 ['/some/path', ...]\n\nSo my implementation is correct! The test I wrote was wrong because it was manually creating sys.path with duplicate entries. Let me fix the test to match the actual Python behavior:\n\n```bash\ncat <<'EOF' > test_pythonpath_correct.py\nimport sys\nimport os\n\ndef test_pythonpath_case(pythonpath_value, description, expected_first):\n    \"\"\"Test a specific PYTHONPATH case.\"\"\"\n    print(f\"\\n{'='*60}\")\n    print(f\"Test: {description}\")\n    print(f\"PYTHONPATH: {repr(pythonpath_value)}\")\n    \n    # Save original sys.path and PYTHONPATH\n    original_path = sys.path.copy()\n    original_pythonpath = os.environ.get(\"PYTHONPATH\", \"\")\n    \n    # Simulate what Python does with PYTHONPATH\n    cwd = os.getcwd()\n    if pythonpath_value is None:\n        # No PYTHONPATH: ['', ...]\n        sys.path = [''] + original_path[1:]\n    elif pythonpath_value.startswith(':'):\n        # Leading ':': ['', cwd, paths_from_pythonpath, ...]\n        paths = [p for p in pythonpath_value[1:].split(':') if p]\n        sys.path = ['', cwd] + paths + original_path[1:]\n    elif pythonpath_value.endswith(':'):\n        # Trailing ':': ['', paths_from_pythonpath, cwd, ...]\n        paths = [p for p in pythonpath_value[:-1].split(':') if p]\n        sys.path = [''] + paths + [cwd] + original_path[1:]\n    else:\n        # Normal PYTHONPATH: ['', paths_from_pythonpath, ...]\n        paths = [p for p in pythonpath_value.split(':') if p]\n        sys.path = [''] + paths + original_path[1:]\n    \n    if pythonpath_value is not None:\n        os.environ[\"PYTHONPATH\"] = pythonpath_value\n    elif \"PYTHONPATH\" in os.environ:\n        del os.environ[\"PYTHONPATH\"]\n    \n    print(f\"Before modify_sys_path: {sys.path[:4]}\")\n    \n    # Import and call modify_sys_path directly\n    from pylint import modify_sys_path\n    modify_sys_path()\n    \n    print(f\"After modify_sys_path: {sys.path[:4]}\")\n    result_first = sys.path[0]\n    \n    # Restore original environment\n    sys.path = original_path\n    if original_pythonpath:\n        os.environ[\"PYTHONPATH\"] = original_pythonpath\n    elif \"PYTHONPATH\" in os.environ:\n        del os.environ[\"PYTHONPATH\"]\n    \n    if result_first == expected_first:\n        print(f\"\u2713 PASS: First entry is {repr(result_first)} as expected\")\n        return True\n    else:\n        print(f\"\u2717 FAIL: Expected {repr(expected_first)}, got {repr(result_first)}\")\n        return False\n\n# Test cases\ncwd = os.getcwd()\nresults = []\n\n# Test 1: PYTHONPATH with leading colon\nresults.append(test_pythonpath_case(\n    ':/some/path',\n    \"PYTHONPATH with leading ':' - should remove both '' and cwd\",\n    '/some/path'\n))\n\n# Test 2: PYTHONPATH with trailing colon\nresults.append(test_pythonpath_case(\n    '/some/path:',\n    \"PYTHONPATH with trailing ':' - should remove '' and cwd at position 1\",\n    '/some/path'\n))\n\n# Test 3: PYTHONPATH with cwd explicitly at start\nresults.append(test_pythonpath_case(\n    f':{cwd}',\n    \"PYTHONPATH with ':cwd' - should only remove first ''\",\n    cwd\n))\n\n# Test 4: PYTHONPATH with dot explicitly at start\nresults.append(test_pythonpath_case(\n    ':.',\n    \"PYTHONPATH with ':.' - should only remove first ''\",\n    '.'\n))\n\n# Test 5: No PYTHONPATH\nresults.append(test_pythonpath_case(\n    None,\n    \"No PYTHONPATH - should remove only ''\",\n    original_path[1] if len(sys.path) > 1 else None\n))\n\nprint(f\"\\n{'='*60}\")\nprint(f\"Summary: {sum(results)}/{len(results)} tests passed\")\nif all(results):\n    print(\"\u2713 All tests passed!\")\nelse:\n    print(\"\u2717 Some tests failed\")\nEOF\n```",
-    "reward": 0.3786716852362805
+    "reward": 0.3787326212102816
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this corrected test:\n\n```bash\ncd /testbed && python test_pythonpath_correct.py\n```",
-    "reward": 0.4644528087271341
+    "reward": 0.4645543686838026
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good progress! Most tests pass, but there's an issue with the ':.' test case. The problem is that when PYTHONPATH=':.' Python adds cwd (/testbed) after the initial '', not '.'. Let me fix the test to reflect the actual Python behavior:\n\n```bash\ncat <<'EOF' > test_pythonpath_correct.py\nimport sys\nimport os\n\ndef test_pythonpath_case(pythonpath_value, description, expected_first):\n    \"\"\"Test a specific PYTHONPATH case.\"\"\"\n    print(f\"\\n{'='*60}\")\n    print(f\"Test: {description}\")\n    print(f\"PYTHONPATH: {repr(pythonpath_value)}\")\n    \n    # Save original sys.path and PYTHONPATH\n    original_path = sys.path.copy()\n    original_pythonpath = os.environ.get(\"PYTHONPATH\", \"\")\n    \n    # Simulate what Python does with PYTHONPATH\n    cwd = os.getcwd()\n    if pythonpath_value is None:\n        # No PYTHONPATH: ['', ...]\n        sys.path = [''] + original_path[1:]\n    elif pythonpath_value.startswith(':'):\n        # Leading ':': ['', cwd, paths_from_pythonpath, ...]\n        # Note: Python adds cwd, not the literal string from PYTHONPATH\n        paths = [p for p in pythonpath_value[1:].split(':') if p]\n        # If the path after ':' is '.' or cwd, Python still adds cwd\n        sys.path = ['', cwd] + paths + original_path[1:]\n    elif pythonpath_value.endswith(':'):\n        # Trailing ':': ['', paths_from_pythonpath, cwd, ...]\n        paths = [p for p in pythonpath_value[:-1].split(':') if p]\n        sys.path = [''] + paths + [cwd] + original_path[1:]\n    else:\n        # Normal PYTHONPATH: ['', paths_from_pythonpath, ...]\n        paths = [p for p in pythonpath_value.split(':') if p]\n        sys.path = [''] + paths + original_path[1:]\n    \n    if pythonpath_value is not None:\n        os.environ[\"PYTHONPATH\"] = pythonpath_value\n    elif \"PYTHONPATH\" in os.environ:\n        del os.environ[\"PYTHONPATH\"]\n    \n    print(f\"Before modify_sys_path: {sys.path[:4]}\")\n    \n    # Import and call modify_sys_path directly\n    from pylint import modify_sys_path\n    modify_sys_path()\n    \n    print(f\"After modify_sys_path: {sys.path[:4]}\")\n    result_first = sys.path[0]\n    \n    # Restore original environment\n    sys.path = original_path\n    if original_pythonpath:\n        os.environ[\"PYTHONPATH\"] = original_pythonpath\n    elif \"PYTHONPATH\" in os.environ:\n        del os.environ[\"PYTHONPATH\"]\n    \n    if result_first == expected_first:\n        print(f\"\u2713 PASS: First entry is {repr(result_first)} as expected\")\n        return True\n    else:\n        print(f\"\u2717 FAIL: Expected {repr(expected_first)}, got {repr(result_first)}\")\n        return False\n\n# Test cases\ncwd = os.getcwd()\nresults = []\noriginal_path = sys.path.copy()\n\n# Test 1: PYTHONPATH with leading colon\nresults.append(test_pythonpath_case(\n    ':/some/path',\n    \"PYTHONPATH with leading ':' - should remove both '' and cwd\",\n    '/some/path'\n))\n\n# Test 2: PYTHONPATH with trailing colon\nresults.append(test_pythonpath_case(\n    '/some/path:',\n    \"PYTHONPATH with trailing ':' - should remove '' and cwd at position 1\",\n    '/some/path'\n))\n\n# Test 3: PYTHONPATH with cwd explicitly at start\nresults.append(test_pythonpath_case(\n    f':{cwd}',\n    \"PYTHONPATH with ':cwd' - should only remove first '', preserve cwd\",\n    cwd\n))\n\n# Test 4: PYTHONPATH with dot explicitly at start\n# Note: Python interprets ':.' as adding cwd, then '.'\nresults.append(test_pythonpath_case(\n    ':.',\n    \"PYTHONPATH with ':.' - should only remove first '', preserve cwd\",\n    cwd\n))\n\n# Test 5: No PYTHONPATH\nresults.append(test_pythonpath_case(\n    None,\n    \"No PYTHONPATH - should remove only ''\",\n    original_path[1] if len(original_path) > 1 else None\n))\n\nprint(f\"\\n{'='*60}\")\nprint(f\"Summary: {sum(results)}/{len(results)} tests passed\")\nif all(results):\n    print(\"\u2713 All tests passed!\")\nelse:\n    print(\"\u2717 Some tests failed\")\nEOF\n```",
-    "reward": 0.27408801454522363
+    "reward": 0.274257281139671
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the corrected test:\n\n```bash\ncd /testbed && python test_pythonpath_correct.py\n```",
-    "reward": 0.4568133575753728
+    "reward": 0.4570954685661184
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All the PYTHONPATH tests pass. Now let me verify the original reproduction test still works:\n\n```bash\ncd /testbed && python test_reproduce_bug.py 2>&1 | tail -5\n```",
-    "reward": 0.344688929292288
+    "reward": 0.34515911427686397
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix works correctly. Now let me run the existing pylint tests to make sure I haven't broken anything. Let me first check if there are any tests related to `modify_sys_path`:\n\n```bash\nfind /testbed/tests -name \"*.py\" -type f -exec grep -l \"modify_sys_path\" {} \\;\n```",
-    "reward": 0.07448154882047998
+    "reward": 0.07526519046143999
   },
   {
     "role": "user",
@@ -407,7 +407,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check what tests exist for `modify_sys_path`:\n\n```bash\ngrep -A 30 \"def test_modify_sys_path\" /testbed/tests/test_self.py\n```",
-    "reward": 0.12413591470079999
+    "reward": 0.12544198410239998
   },
   {
     "role": "user",
@@ -421,7 +421,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me see more of this test:\n\n```bash\ngrep -A 60 \"def test_modify_sys_path\" /testbed/tests/test_self.py\n```",
-    "reward": 0.20689319116799998
+    "reward": 0.209069973504
   },
   {
     "role": "user",
@@ -435,7 +435,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me see the rest of the test:\n\n```bash\ngrep -A 80 \"def test_modify_sys_path\" /testbed/tests/test_self.py | tail -30\n```",
-    "reward": 0.34482198527999997
+    "reward": 0.34844995584
   },
   {
     "role": "user",
@@ -449,7 +449,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this specific test to see if my changes break it:\n\n```bash\ncd /testbed && python -m pytest tests/test_self.py::TestRunTC::test_modify_sys_path -xvs\n```",
-    "reward": 0.5747033088
+    "reward": 0.5807499264
   },
   {
     "role": "user",
@@ -463,7 +463,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The existing test passes. Now let me create one more comprehensive test to verify that custom paths are preserved in various scenarios, including the runpy case from the bug report:\n\n```bash\ncat <<'EOF' > test_final_verification.py\n#!/usr/bin/env python\n\"\"\"Final verification that the fix works correctly.\"\"\"\nimport sys\nimport os\nimport runpy\n\nprint(\"=\"*70)\nprint(\"FINAL VERIFICATION TEST\")\nprint(\"=\"*70)\n\n# Test 1: Original bug report scenario\nprint(\"\\n1. Testing original bug report scenario (runpy with custom path)\")\nprint(\"-\" * 70)\nsys.path.insert(0, \"something\")\nprint(f\"Before runpy: sys.path[0] = {repr(sys.path[0])}\")\n\ntry:\n    # This will call modify_sys_path internally\n    runpy.run_module('pylint', run_name=\"__main__\", alter_sys=True)\nexcept SystemExit:\n    pass\n\nprint(f\"After runpy: sys.path[0] = {repr(sys.path[0])}\")\nif \"something\" in sys.path:\n    print(\"\u2713 PASS: Custom path 'something' preserved\")\nelse:\n    print(\"\u2717 FAIL: Custom path 'something' was removed\")\n\n# Test 2: Direct call with empty string (should be removed)\nprint(\"\\n2. Testing empty string removal\")\nprint(\"-\" * 70)\nsys.path = [\"\"] + sys.path[1:]\nprint(f\"Before: sys.path[0] = {repr(sys.path[0])}\")\nfrom pylint import modify_sys_path\nmodify_sys_path()\nprint(f\"After: sys.path[0] = {repr(sys.path[0])}\")\nif sys.path[0] != \"\":\n    print(\"\u2713 PASS: Empty string was removed\")\nelse:\n    print(\"\u2717 FAIL: Empty string should have been removed\")\n\n# Test 3: Direct call with dot (should be removed)\nprint(\"\\n3. Testing dot removal\")\nprint(\"-\" * 70)\nsys.path = [\".\"] + sys.path[1:]\nprint(f\"Before: sys.path[0] = {repr(sys.path[0])}\")\nmodify_sys_path()\nprint(f\"After: sys.path[0] = {repr(sys.path[0])}\")\nif sys.path[0] != \".\":\n    print(\"\u2713 PASS: Dot was removed\")\nelse:\n    print(\"\u2717 FAIL: Dot should have been removed\")\n\n# Test 4: Direct call with cwd (should be removed)\nprint(\"\\n4. Testing cwd removal\")\nprint(\"-\" * 70)\ncwd = os.getcwd()\nsys.path = [cwd] + sys.path[1:]\nprint(f\"Before: sys.path[0] = {repr(sys.path[0])}\")\nmodify_sys_path()\nprint(f\"After: sys.path[0] = {repr(sys.path[0])}\")\nif sys.path[0] != cwd:\n    print(\"\u2713 PASS: CWD was removed\")\nelse:\n    print(\"\u2717 FAIL: CWD should have been removed\")\n\n# Test 5: Direct call with custom path (should be preserved)\nprint(\"\\n5. Testing custom path preservation\")\nprint(\"-\" * 70)\nsys.path = [\"/my/custom/path\"] + sys.path[1:]\nprint(f\"Before: sys.path[0] = {repr(sys.path[0])}\")\nmodify_sys_path()\nprint(f\"After: sys.path[0] = {repr(sys.path[0])}\")\nif sys.path[0] == \"/my/custom/path\":\n    print(\"\u2713 PASS: Custom path was preserved\")\nelse:\n    print(\"\u2717 FAIL: Custom path should have been preserved\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"VERIFICATION COMPLETE\")\nprint(\"=\"*70)\nEOF\n```",
-    "reward": 0.45783884799999996
+    "reward": 0.46791654399999993
   },
   {
     "role": "user",
@@ -477,7 +477,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the final verification test:\n\n```bash\ncd /testbed && python test_final_verification.py 2>&1 | grep -E \"(^=|^-|^[0-9]|Before:|After:|PASS|FAIL|VERIFICATION)\"\n```",
-    "reward": 0.5963980799999999
+    "reward": 0.6131942399999999
   },
   {
     "role": "user",
@@ -491,7 +491,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me run a broader set of pylint tests to make sure nothing else is broken:\n\n```bash\ncd /testbed && python -m pytest tests/test_self.py -xvs -k \"test_\" 2>&1 | head -100\n```",
-    "reward": 0.4939968
+    "reward": 0.5219904
   },
   {
     "role": "user",
@@ -505,7 +505,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The tests are passing. Let me check if there are any more tests to run and then prepare to submit:\n\n```bash\ncd /testbed && python -m pytest tests/test_self.py::TestRunTC -x 2>&1 | tail -20\n```",
-    "reward": 0.323328
+    "reward": 0.369984
   },
   {
     "role": "user",
@@ -519,7 +519,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass (107 passed, 1 xfailed which is expected). Now let me create a comprehensive summary document and then submit the final solution:\n\n```bash\ncat <<'EOF' > SOLUTION_SUMMARY.md\n# Solution Summary: Fix for sys.path Modification Issue\n\n## Problem\nThe `modify_sys_path()` function in `pylint/__init__.py` was unconditionally removing the first item from `sys.path`, which caused issues when pylint was run via `runpy` with custom paths prepended to `sys.path`.\n\n## Root Cause\nThe original code at line 99 did:\n```python\nsys.path.pop(0)\n```\n\nThis unconditionally removed whatever was at `sys.path[0]`, even if it was a custom path added by the user or an extension.\n\n## Solution\nModified the `modify_sys_path()` function to only remove entries from `sys.path` if they are:\n- Empty string `\"\"`\n- Dot `\".\"`\n- Current working directory `os.getcwd()`\n\n### Changes Made\n1. Added a guard before the first `sys.path.pop(0)` to check if the entry should be removed\n2. Added similar guards for PYTHONPATH-related pops to prevent accidental removal of custom paths\n3. Ensured index safety by checking list length before accessing elements\n\n### Code Changes\n```python\n# Before (line 99):\nsys.path.pop(0)\n\n# After:\ncwd = os.getcwd()\nif sys.path and sys.path[0] in (\"\", \".\", cwd):\n    sys.path.pop(0)\n```\n\nSimilar guards were added for PYTHONPATH handling.\n\n## Testing\n1. \u2713 Original bug reproduction test passes (custom path preserved via runpy)\n2. \u2713 Empty string removal works correctly\n3. \u2713 Dot removal works correctly\n4. \u2713 CWD removal works correctly\n5. \u2713 Custom paths are preserved\n6. \u2713 PYTHONPATH edge cases handled correctly (leading/trailing colons)\n7. \u2713 All existing pylint tests pass (107 passed, 1 xfailed)\n\n## Verification\nThe fix ensures that:\n- Security is maintained: CWD-related entries are still removed to prevent inadvertent imports\n- Compatibility is preserved: All existing tests pass\n- Bug is fixed: Custom paths added by extensions or programmatic usage are preserved\nEOF\n```",
-    "reward": 0.03888
+    "reward": 0.11663999999999997
   },
   {
     "role": "user",
@@ -533,7 +533,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me fix the EOF issue and create the summary properly:\n\n```bash\ncat > SOLUTION_SUMMARY.md << 'ENDOFFILE'\n# Solution Summary: Fix for sys.path Modification Issue\n\n## Problem\nThe `modify_sys_path()` function in `pylint/__init__.py` was unconditionally removing the first item from `sys.path`, which caused issues when pylint was run via `runpy` with custom paths prepended to `sys.path`.\n\n## Root Cause\nThe original code at line 99 unconditionally removed sys.path[0], even if it was a custom path added by the user or an extension.\n\n## Solution\nModified the `modify_sys_path()` function to only remove entries from `sys.path` if they are:\n- Empty string \"\"\n- Dot \".\"\n- Current working directory os.getcwd()\n\n## Testing\nAll tests pass including the original bug reproduction and existing pylint tests.\nENDOFFILE\n```",
-    "reward": 0.0648
+    "reward": 0.19439999999999996
   },
   {
     "role": "user",
@@ -547,7 +547,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me verify the final state of the fix one more time by looking at the modified file:\n\n```bash\ncat pylint/__init__.py | grep -A 15 \"def modify_sys_path\"\n```",
-    "reward": 0.108
+    "reward": 0.32399999999999995
   },
   {
     "role": "user",
@@ -561,7 +561,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me see the complete implementation:\n\n```bash\ncat pylint/__init__.py | sed -n '/def modify_sys_path/,/^version = __version__$/p'\n```",
-    "reward": 0.18
+    "reward": 0.5399999999999999
   },
   {
     "role": "user",
@@ -578,7 +578,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The implementation is correct. Let me run one final comprehensive test to ensure everything works:\n\n```bash\ncd /testbed && python test_reproduce_bug.py 2>&1 | tail -3 && python test_edge_cases.py 2>&1 | tail -3 && python test_pythonpath_correct.py 2>&1 | tail -3\n```",
-    "reward": 0.3
+    "reward": 0.8999999999999999
   },
   {
     "role": "user",
@@ -595,7 +595,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me submit the final solution:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 1.0
   },
   {
     "role": "user",

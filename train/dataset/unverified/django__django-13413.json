@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the PR description and previous attempt analysis.\n\n```bash\nfind /testbed -type f -name \"filters.py\" | grep -E \"(admin|contrib)\" | head -20\n```",
-    "reward": 0.09786617419615173
+    "reward": 0.09787091257749007
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the filters.py file. Let me examine its structure to understand the BooleanFieldListFilter implementation.\n\n```bash\ncat /testbed/django/contrib/admin/filters.py\n```",
-    "reward": 0.16311029032691957
+    "reward": 0.16311818762915012
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The file is too long. Let me search specifically for the BooleanFieldListFilter class to understand its current implementation.\n\n```bash\ngrep -n \"class BooleanFieldListFilter\" /testbed/django/contrib/admin/filters.py\n```",
-    "reward": 0.021850483878199295
+    "reward": 0.021863646048583523
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me view the BooleanFieldListFilter class implementation specifically.\n\n```bash\nsed -n '232,280p' /testbed/django/contrib/admin/filters.py\n```",
-    "reward": 0.03641747313033216
+    "reward": 0.03643941008097254
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see the issue. In the `choices` method of `BooleanFieldListFilter` (lines 246-260), the labels are hardcoded as `_('Yes')` and `_('No')`. According to the PR description and the previous attempt analysis, we need to:\n\n1. Check if the field has choices defined\n2. If yes, use those choice labels for True/False values\n3. If no, fall back to the default _('Yes')/_('No')\n\nLet me also check the ChoicesFieldListFilter to see how it handles choices:\n\n```bash\nsed -n '265,300p' /testbed/django/contrib/admin/filters.py\n```",
-    "reward": 0.0606957885505536
+    "reward": 0.06073235013495423
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! I can see that `ChoicesFieldListFilter` uses `self.field.flatchoices` to get the choice labels. Now let me create a test script to reproduce the issue first, then I'll implement the fix.\n\n```bash\ncat <<'EOF' > /testbed/test_boolean_choices.py\n\"\"\"\nTest script to reproduce the BooleanFieldListFilter choices issue.\n\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\n\n# Create a minimal Django settings module\nsettings_content = \"\"\"\nSECRET_KEY = 'test-secret-key'\nINSTALLED_APPS = [\n    'django.contrib.contenttypes',\n    'django.contrib.auth',\n    'django.contrib.admin',\n]\nDATABASES = {\n    'default': {\n        'ENGINE': 'django.db.backends.sqlite3',\n        'NAME': ':memory:',\n    }\n}\nUSE_I18N = True\n\"\"\"\n\nwith open('/testbed/test_settings.py', 'w') as f:\n    f.write(settings_content)\n\ndjango.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\nfrom django.contrib.admin.filters import BooleanFieldListFilter\nfrom django.test import RequestFactory\n\n# Create a test model\nclass BoolTest(models.Model):\n    BOUGHT_CHOICES = (\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    bought = models.BooleanField(\n        verbose_name=\"Fancy Boolean\",\n        default=False,\n        choices=BOUGHT_CHOICES\n    )\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Create a test admin\nclass BoolTestAdmin(ModelAdmin):\n    list_filter = ('bought',)\n\n# Test the filter\nrequest = RequestFactory().get('/')\nfield = BoolTest._meta.get_field('bought')\n\n# Create the filter\nfilter_instance = BooleanFieldListFilter(\n    field, request, {}, BoolTest, BoolTestAdmin(BoolTest, site), 'bought'\n)\n\n# Mock changelist\nclass MockChangeList:\n    def get_query_string(self, new_params=None, remove=None):\n        return \"?test\"\n\nchangelist = MockChangeList()\n\nprint(\"Current filter choices:\")\nfor choice in filter_instance.choices(changelist):\n    print(f\"  {choice['display']}\")\n\nprint(\"\\nExpected choices:\")\nprint(\"  All\")\nprint(\"  Bought\")\nprint(\"  Pending\")\n\nprint(\"\\nField has choices:\", hasattr(field, 'choices') and field.choices is not None)\nif hasattr(field, 'choices') and field.choices:\n    print(\"Field choices:\", field.choices)\n    print(\"Field flatchoices:\", field.flatchoices)\nEOF\n```",
-    "reward": 0.10115964758425601
+    "reward": 0.10122058355825705
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the test script to confirm the issue:\n\n```bash\ncd /testbed && python test_boolean_choices.py\n```",
-    "reward": 0.0019327459737600006
+    "reward": 0.002034305930428416
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The issue is confirmed. The filter is showing \"Yes\" and \"No\" instead of \"Bought\" and \"Pending\". Now I need to modify the `BooleanFieldListFilter.choices()` method to respect field choices. Based on the previous attempt analysis and the ChoicesFieldListFilter implementation, I should:\n\n1. Check if the field has choices\n2. Create a mapping from the flatchoices\n3. Use the custom labels for True/False if they exist, otherwise fall back to _('Yes')/_('No')\n4. Also consider the None case for nullable fields\n\nLet me implement the fix:\n\n```bash\ncat <<'EOF' > /tmp/fix_boolean_filter.py\nimport sys\n\n# Read the file\nwith open('/testbed/django/contrib/admin/filters.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the choices method in BooleanFieldListFilter\nold_choices_method = '''    def choices(self, changelist):\n        for lookup, title in (\n                (None, _('All')),\n                ('1', _('Yes')),\n                ('0', _('No'))):\n            yield {\n                'selected': self.lookup_val == lookup and not self.lookup_val2,\n                'query_string': changelist.get_query_string({self.lookup_kwarg: lookup}, [self.lookup_kwarg2]),\n                'display': title,\n            }\n        if self.field.null:\n            yield {\n                'selected': self.lookup_val2 == 'True',\n                'query_string': changelist.get_query_string({self.lookup_kwarg2: 'True'}, [self.lookup_kwarg]),\n                'display': _('Unknown'),\n            }'''\n\nnew_choices_method = '''    def choices(self, changelist):\n        # Get custom labels from field choices if available\n        field_choices = dict(self.field.flatchoices) if self.field.choices else {}\n        \n        for lookup, title in (\n                (None, _('All')),\n                ('1', field_choices.get(True, _('Yes'))),\n                ('0', field_choices.get(False, _('No')))):\n            yield {\n                'selected': self.lookup_val == lookup and not self.lookup_val2,\n                'query_string': changelist.get_query_string({self.lookup_kwarg: lookup}, [self.lookup_kwarg2]),\n                'display': title,\n            }\n        if self.field.null:\n            # Use custom None label if provided in choices, otherwise use 'Unknown'\n            none_title = field_choices.get(None, _('Unknown'))\n            yield {\n                'selected': self.lookup_val2 == 'True',\n                'query_string': changelist.get_query_string({self.lookup_kwarg2: 'True'}, [self.lookup_kwarg]),\n                'display': none_title,\n            }'''\n\n# Replace the method\nif old_choices_method in content:\n    content = content.replace(old_choices_method, new_choices_method)\n    with open('/testbed/django/contrib/admin/filters.py', 'w') as f:\n        f.write(content)\n    print(\"Successfully updated BooleanFieldListFilter.choices() method\")\nelse:\n    print(\"ERROR: Could not find the exact method to replace\")\n    sys.exit(1)\nEOF\n\npython /tmp/fix_boolean_filter.py\n```",
-    "reward": 0.003221243289600001
+    "reward": 0.00339050988404736
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The fix has been applied. Now let me verify that the fix works by running the test script again:\n\n```bash\ncd /testbed && python test_boolean_choices.py\n```",
-    "reward": 0.005368738816000002
+    "reward": 0.0056508498067456
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works correctly. Now let me create additional test cases to verify edge cases:\n1. BooleanField without choices (should fall back to Yes/No)\n2. BooleanField with null=True and a custom None label\n3. BooleanField with null=True without a custom None label\n\n```bash\ncat <<'EOF' > /testbed/test_edge_cases.py\n\"\"\"\nTest edge cases for BooleanFieldListFilter with choices.\n\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\ndjango.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\nfrom django.contrib.admin.filters import BooleanFieldListFilter\nfrom django.test import RequestFactory\n\n# Test case 1: BooleanField without choices (should use Yes/No)\nclass TestModel1(models.Model):\n    field = models.BooleanField(default=False)\n    class Meta:\n        app_label = 'test_app'\n\n# Test case 2: BooleanField with choices and null=True with custom None label\nclass TestModel2(models.Model):\n    CHOICES = (\n        (None, 'Not Set'),\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    field = models.BooleanField(\n        null=True,\n        choices=CHOICES\n    )\n    class Meta:\n        app_label = 'test_app'\n\n# Test case 3: BooleanField with choices and null=True without custom None label\nclass TestModel3(models.Model):\n    CHOICES = (\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    field = models.BooleanField(\n        null=True,\n        choices=CHOICES\n    )\n    class Meta:\n        app_label = 'test_app'\n\n# Test case 4: BooleanField with partial choices (only True defined)\nclass TestModel4(models.Model):\n    CHOICES = (\n        (True, 'Active'),\n    )\n    field = models.BooleanField(\n        default=False,\n        choices=CHOICES\n    )\n    class Meta:\n        app_label = 'test_app'\n\nclass TestAdmin(ModelAdmin):\n    list_filter = ('field',)\n\nrequest = RequestFactory().get('/')\n\nclass MockChangeList:\n    def get_query_string(self, new_params=None, remove=None):\n        return \"?test\"\n\nchangelist = MockChangeList()\n\nprint(\"=\" * 60)\nprint(\"Test Case 1: BooleanField without choices\")\nprint(\"=\" * 60)\nfield1 = TestModel1._meta.get_field('field')\nfilter1 = BooleanFieldListFilter(field1, request, {}, TestModel1, TestAdmin(TestModel1, site), 'field')\nfor choice in filter1.choices(changelist):\n    print(f\"  {choice['display']}\")\nprint(\"Expected: All, Yes, No\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test Case 2: BooleanField with null=True and custom None label\")\nprint(\"=\" * 60)\nfield2 = TestModel2._meta.get_field('field')\nfilter2 = BooleanFieldListFilter(field2, request, {}, TestModel2, TestAdmin(TestModel2, site), 'field')\nfor choice in filter2.choices(changelist):\n    print(f\"  {choice['display']}\")\nprint(\"Expected: All, Bought, Pending, Not Set\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test Case 3: BooleanField with null=True without custom None label\")\nprint(\"=\" * 60)\nfield3 = TestModel3._meta.get_field('field')\nfilter3 = BooleanFieldListFilter(field3, request, {}, TestModel3, TestAdmin(TestModel3, site), 'field')\nfor choice in filter3.choices(changelist):\n    print(f\"  {choice['display']}\")\nprint(\"Expected: All, Bought, Pending, Unknown\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test Case 4: BooleanField with partial choices (only True)\")\nprint(\"=\" * 60)\nfield4 = TestModel4._meta.get_field('field')\nfilter4 = BooleanFieldListFilter(field4, request, {}, TestModel4, TestAdmin(TestModel4, site), 'field')\nfor choice in filter4.choices(changelist):\n    print(f\"  {choice['display']}\")\nprint(\"Expected: All, Active, No\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"All edge cases tested successfully!\")\nprint(\"=\" * 60)\nEOF\n\npython /testbed/test_edge_cases.py\n```",
-    "reward": 0.09228123136000001
+    "reward": 0.09275141634457601
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All edge cases are working correctly:\n1. Without choices: Falls back to \"Yes\"/\"No\" \u2713\n2. With null=True and custom None label: Uses \"Not Set\" \u2713\n3. With null=True without custom None label: Falls back to \"Unknown\" \u2713\n4. With partial choices: Uses custom label for True, falls back to \"No\" for False \u2713\n\nNow let me verify the actual implementation by viewing the modified code:\n\n```bash\nsed -n '246,265p' /testbed/django/contrib/admin/filters.py\n```",
-    "reward": -0.012864614399999995
+    "reward": -0.01208097275904
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! The implementation looks correct. Now let me run Django's existing admin filter tests to ensure we haven't broken anything:\n\n```bash\ncd /testbed && python -m pytest tests/admin_filters/tests.py -xvs 2>&1 | head -100\n```",
-    "reward": -0.021441023999999993
+    "reward": -0.0201349545984
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try using Django's test runner instead:\n\n```bash\ncd /testbed && python tests/runtests.py admin_filters --verbosity=2 2>&1 | head -150\n```",
-    "reward": -0.03573503999999999
+    "reward": -0.033558257664
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All 43 tests in admin_filters passed. Now let me also run the admin_views tests to ensure broader compatibility:\n\n```bash\ncd /testbed && python tests/runtests.py admin_views --verbosity=1 2>&1 | tail -50\n```",
-    "reward": -0.059558399999999984
+    "reward": -0.055930429440000005
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check if the admin_views tests passed by looking at the summary:\n\n```bash\ncd /testbed && python tests/runtests.py admin_views --verbosity=1 2>&1 | grep -E \"(OK|FAILED|Ran [0-9]+ test)\"\n```",
-    "reward": -0.09926399999999998
+    "reward": -0.0932173824
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me create a comprehensive test to demonstrate the fix works as described in the PR:\n\n```bash\ncat <<'EOF' > /testbed/test_pr_fix.py\n\"\"\"\nTest to demonstrate the fix for the PR:\nBooleanFieldListFilter doesn't respect field choices.\n\nThis test reproduces the exact scenario from the PR description.\n\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\ndjango.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\nfrom django.contrib.admin.filters import BooleanFieldListFilter\nfrom django.test import RequestFactory\n\n# Exact model from PR description\nclass BoolTest(models.Model):\n    BOUGHT_CHOICES = (\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    bought = models.BooleanField(\n        verbose_name=\"Fancy Boolean\",\n        default=False,\n        choices=BOUGHT_CHOICES\n    )\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Exact admin from PR description\nclass BoolTestAdmin(ModelAdmin):\n    list_filter = ('bought',)\n\n# Test the filter\nrequest = RequestFactory().get('/')\nfield = BoolTest._meta.get_field('bought')\n\n# Create the filter\nfilter_instance = BooleanFieldListFilter(\n    field, request, {}, BoolTest, BoolTestAdmin(BoolTest, site), 'bought'\n)\n\n# Mock changelist\nclass MockChangeList:\n    def get_query_string(self, new_params=None, remove=None):\n        return \"?test\"\n\nchangelist = MockChangeList()\n\nprint(\"=\" * 60)\nprint(\"PR FIX VERIFICATION\")\nprint(\"=\" * 60)\nprint(\"\\nPR Description states:\")\nprint(\"  BEFORE (incorrect): All, Yes, No\")\nprint(\"  AFTER (correct):    All, Bought, Pending\")\nprint(\"\\nActual output from fixed code:\")\n\nchoices_list = list(filter_instance.choices(changelist))\nfor choice in choices_list:\n    print(f\"  {choice['display']}\")\n\n# Verify the fix\nexpected_labels = ['All', 'Bought', 'Pending']\nactual_labels = [choice['display'] for choice in choices_list]\n\nif actual_labels == expected_labels:\n    print(\"\\n\u2713 SUCCESS: Filter now respects field choices!\")\n    print(\"  The labels 'Bought' and 'Pending' are correctly displayed\")\n    print(\"  instead of the default 'Yes' and 'No'.\")\nelse:\n    print(\"\\n\u2717 FAILURE: Filter does not respect field choices\")\n    print(f\"  Expected: {expected_labels}\")\n    print(f\"  Got: {actual_labels}\")\n    sys.exit(1)\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"PR FIX VERIFIED SUCCESSFULLY\")\nprint(\"=\" * 60)\nEOF\n\npython /testbed/test_pr_fix.py\n```",
-    "reward": -0.16543999999999998
+    "reward": -0.155362304
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The test is working correctly but there's a Unicode encoding issue with the checkmark. Let me fix that:\n\n```bash\ncat <<'EOF' > /testbed/test_pr_fix.py\n\"\"\"\nTest to demonstrate the fix for the PR:\nBooleanFieldListFilter doesn't respect field choices.\n\nThis test reproduces the exact scenario from the PR description.\n\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\ndjango.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\nfrom django.contrib.admin.filters import BooleanFieldListFilter\nfrom django.test import RequestFactory\n\n# Exact model from PR description\nclass BoolTest(models.Model):\n    BOUGHT_CHOICES = (\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    bought = models.BooleanField(\n        verbose_name=\"Fancy Boolean\",\n        default=False,\n        choices=BOUGHT_CHOICES\n    )\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Exact admin from PR description\nclass BoolTestAdmin(ModelAdmin):\n    list_filter = ('bought',)\n\n# Test the filter\nrequest = RequestFactory().get('/')\nfield = BoolTest._meta.get_field('bought')\n\n# Create the filter\nfilter_instance = BooleanFieldListFilter(\n    field, request, {}, BoolTest, BoolTestAdmin(BoolTest, site), 'bought'\n)\n\n# Mock changelist\nclass MockChangeList:\n    def get_query_string(self, new_params=None, remove=None):\n        return \"?test\"\n\nchangelist = MockChangeList()\n\nprint(\"=\" * 60)\nprint(\"PR FIX VERIFICATION\")\nprint(\"=\" * 60)\nprint(\"\\nPR Description states:\")\nprint(\"  BEFORE (incorrect): All, Yes, No\")\nprint(\"  AFTER (correct):    All, Bought, Pending\")\nprint(\"\\nActual output from fixed code:\")\n\nchoices_list = list(filter_instance.choices(changelist))\nfor choice in choices_list:\n    print(\"  %s\" % choice['display'])\n\n# Verify the fix\nexpected_labels = ['All', 'Bought', 'Pending']\nactual_labels = [choice['display'] for choice in choices_list]\n\nif actual_labels == expected_labels:\n    print(\"\\n[SUCCESS] Filter now respects field choices!\")\n    print(\"  The labels 'Bought' and 'Pending' are correctly displayed\")\n    print(\"  instead of the default 'Yes' and 'No'.\")\nelse:\n    print(\"\\n[FAILURE] Filter does not respect field choices\")\n    print(\"  Expected: %s\" % expected_labels)\n    print(\"  Got: %s\" % actual_labels)\n    sys.exit(1)\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"PR FIX VERIFIED SUCCESSFULLY\")\nprint(\"=\" * 60)\nEOF\n\npython /testbed/test_pr_fix.py\n```",
-    "reward": 0.0576
+    "reward": 0.07439615999999999
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix is working correctly. Let me now verify the actual changes made to the source file and ensure everything is in order:\n\n```bash\ncd /testbed && git diff django/contrib/admin/filters.py\n```",
-    "reward": 0.096
+    "reward": 0.1239936
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The changes look good. Let me create one final comprehensive test to ensure all scenarios work correctly, including the ordering mentioned in the PR (the order should be All, True label, False label):\n\n```bash\ncat <<'EOF' > /testbed/test_final_comprehensive.py\n\"\"\"\nComprehensive test for BooleanFieldListFilter with choices fix.\n\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\ndjango.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\nfrom django.contrib.admin.filters import BooleanFieldListFilter\nfrom django.test import RequestFactory\n\ndef test_filter(model_class, field_name, expected_labels, description):\n    \"\"\"Helper function to test a filter configuration.\"\"\"\n    print(\"\\n\" + \"=\" * 60)\n    print(description)\n    print(\"=\" * 60)\n    \n    request = RequestFactory().get('/')\n    field = model_class._meta.get_field(field_name)\n    \n    class TestAdmin(ModelAdmin):\n        list_filter = (field_name,)\n    \n    filter_instance = BooleanFieldListFilter(\n        field, request, {}, model_class, TestAdmin(model_class, site), field_name\n    )\n    \n    class MockChangeList:\n        def get_query_string(self, new_params=None, remove=None):\n            return \"?test\"\n    \n    changelist = MockChangeList()\n    choices_list = list(filter_instance.choices(changelist))\n    actual_labels = [choice['display'] for choice in choices_list]\n    \n    print(\"Expected:\", expected_labels)\n    print(\"Actual:  \", actual_labels)\n    \n    if actual_labels == expected_labels:\n        print(\"Result: PASS\")\n        return True\n    else:\n        print(\"Result: FAIL\")\n        return False\n\n# Test 1: Original PR case\nclass BoolTest(models.Model):\n    BOUGHT_CHOICES = (\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    bought = models.BooleanField(\n        verbose_name=\"Fancy Boolean\",\n        default=False,\n        choices=BOUGHT_CHOICES\n    )\n    class Meta:\n        app_label = 'test_app'\n\n# Test 2: No choices (default behavior)\nclass NoChoicesTest(models.Model):\n    field = models.BooleanField(default=False)\n    class Meta:\n        app_label = 'test_app'\n\n# Test 3: With null and custom None label\nclass NullWithLabelTest(models.Model):\n    CHOICES = (\n        (None, 'Not Set'),\n        (False, 'Inactive'),\n        (True, 'Active')\n    )\n    field = models.BooleanField(null=True, choices=CHOICES)\n    class Meta:\n        app_label = 'test_app'\n\n# Test 4: With null but no custom None label\nclass NullNoLabelTest(models.Model):\n    CHOICES = (\n        (False, 'Inactive'),\n        (True, 'Active')\n    )\n    field = models.BooleanField(null=True, choices=CHOICES)\n    class Meta:\n        app_label = 'test_app'\n\n# Test 5: Reversed order in choices (True before False)\nclass ReversedOrderTest(models.Model):\n    CHOICES = (\n        (True, 'Enabled'),\n        (False, 'Disabled')\n    )\n    field = models.BooleanField(default=False, choices=CHOICES)\n    class Meta:\n        app_label = 'test_app'\n\n# Run all tests\nall_passed = True\n\nall_passed &= test_filter(\n    BoolTest, 'bought',\n    ['All', 'Bought', 'Pending'],\n    \"Test 1: Original PR case - Custom labels for True/False\"\n)\n\nall_passed &= test_filter(\n    NoChoicesTest, 'field',\n    ['All', 'Yes', 'No'],\n    \"Test 2: No choices - Should use default Yes/No\"\n)\n\nall_passed &= test_filter(\n    NullWithLabelTest, 'field',\n    ['All', 'Active', 'Inactive', 'Not Set'],\n    \"Test 3: Null with custom None label\"\n)\n\nall_passed &= test_filter(\n    NullNoLabelTest, 'field',\n    ['All', 'Active', 'Inactive', 'Unknown'],\n    \"Test 4: Null without custom None label - Should use 'Unknown'\"\n)\n\nall_passed &= test_filter(\n    ReversedOrderTest, 'field',\n    ['All', 'Enabled', 'Disabled'],\n    \"Test 5: Choices in reversed order - Filter order is always All, True, False\"\n)\n\nprint(\"\\n\" + \"=\" * 60)\nif all_passed:\n    print(\"ALL TESTS PASSED!\")\n    print(\"The BooleanFieldListFilter now correctly respects field choices.\")\nelse:\n    print(\"SOME TESTS FAILED!\")\n    sys.exit(1)\nprint(\"=\" * 60)\nEOF\n\npython /testbed/test_final_comprehensive.py\n```",
-    "reward": 0.16
+    "reward": 0.206656
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Let me also verify that the fix handles the selection state correctly (i.e., when a filter option is selected):\n\n```bash\ncat <<'EOF' > /testbed/test_selection_state.py\n\"\"\"\nTest that selection state works correctly with custom choices.\n\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\ndjango.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\nfrom django.contrib.admin.filters import BooleanFieldListFilter\nfrom django.test import RequestFactory\n\nclass BoolTest(models.Model):\n    BOUGHT_CHOICES = (\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    bought = models.BooleanField(\n        verbose_name=\"Fancy Boolean\",\n        default=False,\n        choices=BOUGHT_CHOICES\n    )\n    class Meta:\n        app_label = 'test_app'\n\nclass BoolTestAdmin(ModelAdmin):\n    list_filter = ('bought',)\n\nclass MockChangeList:\n    def get_query_string(self, new_params=None, remove=None):\n        return \"?test\"\n\nchangelist = MockChangeList()\n\nprint(\"=\" * 60)\nprint(\"Testing selection state with custom choices\")\nprint(\"=\" * 60)\n\n# Test 1: No filter selected (All should be selected)\nprint(\"\\nTest 1: No filter parameter (All selected)\")\nrequest = RequestFactory().get('/')\nfield = BoolTest._meta.get_field('bought')\nfilter_instance = BooleanFieldListFilter(\n    field, request, {}, BoolTest, BoolTestAdmin(BoolTest, site), 'bought'\n)\nfor choice in filter_instance.choices(changelist):\n    if choice['selected']:\n        print(\"  Selected: %s\" % choice['display'])\n        assert choice['display'] == 'All', \"Expected 'All' to be selected\"\n\n# Test 2: True selected (Bought should be selected)\nprint(\"\\nTest 2: bought__exact=1 (Bought selected)\")\nrequest = RequestFactory().get('/?bought__exact=1')\nfilter_instance = BooleanFieldListFilter(\n    field, request, {'bought__exact': '1'}, BoolTest, BoolTestAdmin(BoolTest, site), 'bought'\n)\nfor choice in filter_instance.choices(changelist):\n    if choice['selected']:\n        print(\"  Selected: %s\" % choice['display'])\n        assert choice['display'] == 'Bought', \"Expected 'Bought' to be selected\"\n\n# Test 3: False selected (Pending should be selected)\nprint(\"\\nTest 3: bought__exact=0 (Pending selected)\")\nrequest = RequestFactory().get('/?bought__exact=0')\nfilter_instance = BooleanFieldListFilter(\n    field, request, {'bought__exact': '0'}, BoolTest, BoolTestAdmin(BoolTest, site), 'bought'\n)\nfor choice in filter_instance.choices(changelist):\n    if choice['selected']:\n        print(\"  Selected: %s\" % choice['display'])\n        assert choice['display'] == 'Pending', \"Expected 'Pending' to be selected\"\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"All selection state tests passed!\")\nprint(\"=\" * 60)\nEOF\n\npython /testbed/test_selection_state.py\n```",
-    "reward": 0.1
+    "reward": 0.17776
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass, including selection state. Now let me verify one more time that the existing Django test suite still passes with our changes:\n\n```bash\ncd /testbed && python tests/runtests.py admin_filters admin_views --verbosity=1 2>&1 | grep -E \"(OK|FAILED|Ran [0-9]+ test)\"\n```",
-    "reward": 0.0
+    "reward": 0.1296
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All 420 tests pass (43 from admin_filters + 377 from admin_views). The fix is complete and working correctly. Let me create a summary document and then submit the final output:\n\n```bash\ncat <<'EOF' > /testbed/IMPLEMENTATION_SUMMARY.md\n# BooleanFieldListFilter Choices Fix - Implementation Summary\n\n## Problem\nBooleanFieldListFilter in Django admin was not respecting custom choices defined on BooleanField models. It always displayed \"Yes\" and \"No\" instead of the custom labels.\n\n## Solution\nModified the `choices()` method in `BooleanFieldListFilter` class in `/testbed/django/contrib/admin/filters.py` to:\n\n1. Extract custom labels from `field.flatchoices` when choices are defined\n2. Use custom labels for True/False values via dictionary lookup\n3. Fall back to default _('Yes')/_('No') when no choices are defined\n4. Support custom None labels for nullable BooleanFields\n\n## Changes Made\nFile: `django/contrib/admin/filters.py`\n\n### Modified Method: `BooleanFieldListFilter.choices()`\n- Added logic to create a mapping from field.flatchoices when choices exist\n- Changed hardcoded _('Yes')/_('No') to use field_choices.get(True/False) with fallback\n- Enhanced null handling to use custom None label if provided in choices\n\n## Test Results\n\u2713 All 43 admin_filters tests pass\n\u2713 All 377 admin_views tests pass (20 skipped)\n\u2713 Original PR scenario works correctly (Bought/Pending instead of Yes/No)\n\u2713 Backward compatibility maintained (fields without choices still show Yes/No)\n\u2713 Edge cases handled:\n  - BooleanField without choices\n  - BooleanField with null=True and custom None label\n  - BooleanField with null=True without custom None label\n  - Partial choices (only True or False defined)\n  - Selection state works correctly\n\n## Example Usage\n```python\nclass BoolTest(models.Model):\n    BOUGHT_CHOICES = (\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    bought = models.BooleanField(\n        verbose_name=\"Fancy Boolean\",\n        default=False,\n        choices=BOUGHT_CHOICES\n    )\n\nclass BoolTestAdmin(admin.ModelAdmin):\n    list_filter = ('bought',)\n```\n\nFilter now displays: All, Bought, Pending (instead of All, Yes, No)\nEOF\n\ncat /testbed/IMPLEMENTATION_SUMMARY.md\n```",
-    "reward": 0.0
+    "reward": 0.216
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: There was an issue with the heredoc. Let me fix that and create the summary properly:\n\n```bash\ncat > /testbed/IMPLEMENTATION_SUMMARY.md << 'ENDOFDOC'\n# BooleanFieldListFilter Choices Fix - Implementation Summary\n\n## Problem\nBooleanFieldListFilter in Django admin was not respecting custom choices defined on BooleanField models. It always displayed \"Yes\" and \"No\" instead of the custom labels.\n\n## Solution\nModified the `choices()` method in `BooleanFieldListFilter` class in `/testbed/django/contrib/admin/filters.py` to:\n\n1. Extract custom labels from `field.flatchoices` when choices are defined\n2. Use custom labels for True/False values via dictionary lookup\n3. Fall back to default _('Yes')/_('No') when no choices are defined\n4. Support custom None labels for nullable BooleanFields\n\n## Changes Made\nFile: `django/contrib/admin/filters.py`\n\n### Modified Method: `BooleanFieldListFilter.choices()`\n- Added logic to create a mapping from field.flatchoices when choices exist\n- Changed hardcoded _('Yes')/_('No') to use field_choices.get(True/False) with fallback\n- Enhanced null handling to use custom None label if provided in choices\n\n## Test Results\n- All 43 admin_filters tests pass\n- All 377 admin_views tests pass (20 skipped)\n- Original PR scenario works correctly (Bought/Pending instead of Yes/No)\n- Backward compatibility maintained (fields without choices still show Yes/No)\n- Edge cases handled:\n  - BooleanField without choices\n  - BooleanField with null=True and custom None label\n  - BooleanField with null=True without custom None label\n  - Partial choices (only True or False defined)\n  - Selection state works correctly\n\n## Example Usage\n```python\nclass BoolTest(models.Model):\n    BOUGHT_CHOICES = (\n        (False, 'Pending'),\n        (True, 'Bought')\n    )\n    bought = models.BooleanField(\n        verbose_name=\"Fancy Boolean\",\n        default=False,\n        choices=BOUGHT_CHOICES\n    )\n\nclass BoolTestAdmin(admin.ModelAdmin):\n    list_filter = ('bought',)\n```\n\nFilter now displays: All, Bought, Pending (instead of All, Yes, No)\nENDOFDOC\n\ncat /testbed/IMPLEMENTATION_SUMMARY.md\n```",
-    "reward": 0.0
+    "reward": 0.36
   },
   {
     "role": "user",
@@ -340,7 +340,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me use a simpler approach to create the summary:\n\n```bash\necho \"Implementation complete. All tests pass. The fix correctly handles BooleanField choices in admin filters.\" > /testbed/SUMMARY.txt && cat /testbed/SUMMARY.txt\n```",
-    "reward": 0.0
+    "reward": 0.6
   },
   {
     "role": "user",
@@ -357,7 +357,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me submit the final output with the git diff showing all changes:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 1.0
   },
   {
     "role": "user",

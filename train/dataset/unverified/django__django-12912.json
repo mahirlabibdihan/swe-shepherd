@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the previous attempt analysis.\n\n```bash\nls -la\n```",
-    "reward": 0.07273504855829534
+    "reward": 0.07273509631026201
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, this is a Django repository. Based on the previous attempt analysis, the issue is in `django/db/models/sql/query.py` in the `rewrite_cols()` method. The fix involves changing from equality comparison (`==`) to identity comparison (`is`) when matching expressions to previously selected annotations. Let me first locate and examine this file.\n\n```bash\nfind django -name \"query.py\" -path \"*/sql/*\" | head -5\n```",
-    "reward": 0.12122508093049224
+    "reward": 0.12122516051710334
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect, found the file. Now let me examine the `rewrite_cols()` method to understand the current implementation and locate the exact line that needs to be changed.\n\n```bash\ngrep -n \"def rewrite_cols\" django/db/models/sql/query.py\n```",
-    "reward": 0.2020418015508204
+    "reward": 0.20204193419517225
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Found the method at line 362. Let me examine the method and its surrounding context to understand the implementation and locate the exact line with the equality comparison that needs to be changed to identity comparison.\n\n```bash\nnl -ba django/db/models/sql/query.py | sed -n '362,420p'\n```",
-    "reward": 0.33673633591803404
+    "reward": 0.33673655699195376
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I found the exact line that needs to be changed. Line 393 has `if selected_annotation == expr:` which should be changed to `if selected_annotation is expr:` to use identity comparison instead of equality comparison. This will prevent different Exists expressions (or other expressions) that compare equal from being treated as the same annotation.\n\nAccording to the new plan from the previous attempt, I should:\n1. Add a comment explaining why identity comparison is required\n2. Change the comparison from `==` to `is`\n\nLet me make this change using sed:\n\n```bash\nsed -i '391,393s/# Reuse aliases of expressions already selected in subquery./# Reuse aliases of expressions already selected in subquery.\\n                # Use identity comparison (is) instead of equality (==) to avoid\\n                # semantic equality collapsing distinct annotations (e.g., different\\n                # Exists subqueries that compare equal but are distinct instances)./' django/db/models/sql/query.py && sed -i '396s/if selected_annotation == expr:/if selected_annotation is expr:/' django/db/models/sql/query.py\n```",
-    "reward": 0.31122722653005674
+    "reward": 0.31122759498658964
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, the sed command executed successfully. Let me verify the changes were applied correctly by viewing the modified section:\n\n```bash\nnl -ba django/db/models/sql/query.py | sed -n '391,400p'\n```",
-    "reward": 0.26871204421676126
+    "reward": 0.26871265831098273
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The changes have been applied correctly:\n1. Added a multi-line comment explaining why identity comparison is required (lines 392-394)\n2. Changed the comparison from `==` to `is` on line 396\n\nNow I need to create a test script to reproduce the issue and verify that the fix works. Let me create a minimal reproduction script based on the PR description:\n\n```bash\ncat <<'EOF' > test_aggregate_alias_fix.py\n\"\"\"\nTest script to reproduce the aggregate alias bug described in the PR.\nThis script creates a minimal Django setup to test the fix.\n\"\"\"\nimport os\nimport sys\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import Q, Min, Max, Exists, OuterRef\n\n# Create test models\nclass Freight(models.Model):\n    name = models.CharField(max_length=100)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass IndicatorValue(models.Model):\n    TYPE_FREIGHT_CREATED = 'freight_created'\n    TYPE_FREIGHT_COMPLETED = 'freight_completed'\n    \n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    datetime = models.DateTimeField()\n    type = models.CharField(max_length=50)\n    deleted = models.DateTimeField(null=True, blank=True)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass LoadingArm(models.Model):\n    LOADING_TYPE_TOP = 'TOP'\n    LOADING_TYPE_BOTTOM = 'BOTTOM'\n    \n    loading_type = models.CharField(max_length=20)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass Order(models.Model):\n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass OrderItem(models.Model):\n    order = models.ForeignKey(Order, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass OrderItemResult(models.Model):\n    order_line = models.ForeignKey(OrderItem, on_delete=models.CASCADE)\n    loading_arm = models.ForeignKey(LoadingArm, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Test the queryset that was causing the issue\ndef test_aggregate_with_multiple_exists():\n    print(\"Testing aggregate with multiple Exists annotations...\")\n    \n    queryset = IndicatorValue.objects.values(\"freight\").annotate(\n        loading_time=Min(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_CREATED)) - Max(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_COMPLETED)),\n        has_top_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_TOP,\n            ).values('pk')\n        ),\n        has_bottom_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_BOTTOM,\n            ).values('pk')\n        )\n    ).aggregate(\n        top_min=Min(\"loading_time\", filter=Q(has_top_loading=True, has_bottom_loading=False))\n    )\n    \n    # Get the SQL query\n    from django.db import connection\n    from django.db.models import Min as MinAgg\n    \n    # Build the query to inspect SQL\n    qs = IndicatorValue.objects.values(\"freight\").annotate(\n        loading_time=Min(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_CREATED)) - Max(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_COMPLETED)),\n        has_top_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_TOP,\n            ).values('pk')\n        ),\n        has_bottom_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_BOTTOM,\n            ).values('pk')\n        )\n    )\n    \n    # Get the aggregate query\n    from django.db.models.sql.query import Query\n    from django.db.models import Aggregate\n    \n    # Create aggregate query\n    aggregate_query = qs._chain()\n    aggregate_query.query.add_annotation(\n        MinAgg(\"loading_time\", filter=Q(has_top_loading=True, has_bottom_loading=False)),\n        alias='top_min',\n        is_summary=True\n    )\n    \n    sql, params = aggregate_query.query.get_compiler(using='default').as_sql()\n    print(\"\\nGenerated SQL:\")\n    print(sql)\n    print(\"\\nParams:\", params)\n    \n    # Check if the bug is present\n    # The bug would show: FILTER (WHERE (\"has_top_loading\" = false AND \"has_top_loading\" = true))\n    # The fix should show: FILTER (WHERE (\"has_bottom_loading\" = false AND \"has_top_loading\" = true))\n    # or similar with correct distinct aliases\n    \n    if '\"has_top_loading\"' in sql and '\"has_bottom_loading\"' in sql:\n        # Count occurrences in FILTER clause\n        filter_start = sql.find('FILTER')\n        if filter_start != -1:\n            filter_clause = sql[filter_start:filter_start+200]\n            print(\"\\nFILTER clause:\", filter_clause)\n            \n            # Check if both aliases appear in the filter\n            has_top_in_filter = '\"has_top_loading\"' in filter_clause\n            has_bottom_in_filter = '\"has_bottom_loading\"' in filter_clause\n            \n            if has_top_in_filter and has_bottom_in_filter:\n                print(\"\\n\u2713 SUCCESS: Both 'has_top_loading' and 'has_bottom_loading' appear in FILTER clause\")\n                print(\"  This indicates the fix is working correctly!\")\n                return True\n            else:\n                print(\"\\n\u2717 FAILURE: Only one alias appears in FILTER clause\")\n                print(\"  This indicates the bug is still present\")\n                return False\n    else:\n        print(\"\\n? UNCLEAR: Could not find expected aliases in SQL\")\n        return None\n\nif __name__ == '__main__':\n    try:\n        result = test_aggregate_with_multiple_exists()\n        if result:\n            print(\"\\n\" + \"=\"*60)\n            print(\"TEST PASSED: The fix appears to be working correctly!\")\n            print(\"=\"*60)\n            sys.exit(0)\n        else:\n            print(\"\\n\" + \"=\"*60)\n            print(\"TEST FAILED: The bug may still be present\")\n            print(\"=\"*60)\n            sys.exit(1)\n    except Exception as e:\n        print(f\"\\nError during test: {e}\")\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.4478534070279354
+    "reward": 0.44785443051830454
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I've created the test script. Now let me run it to verify that the fix works correctly:\n\n```bash\ncd /testbed && python test_aggregate_alias_fix.py\n```",
-    "reward": 0.5797556783798923
+    "reward": 0.5797573841971742
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The test script needs to create the database tables. Let me create a simpler test that just inspects the SQL generation without actually executing it:\n\n```bash\ncat <<'EOF' > test_aggregate_alias_fix.py\n\"\"\"\nTest script to reproduce the aggregate alias bug described in the PR.\nThis script creates a minimal Django setup to test the fix by inspecting SQL generation.\n\"\"\"\nimport os\nimport sys\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import Q, Min, Max, Exists, OuterRef\n\n# Create test models\nclass Freight(models.Model):\n    name = models.CharField(max_length=100)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass IndicatorValue(models.Model):\n    TYPE_FREIGHT_CREATED = 'freight_created'\n    TYPE_FREIGHT_COMPLETED = 'freight_completed'\n    \n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    datetime = models.DateTimeField()\n    type = models.CharField(max_length=50)\n    deleted = models.DateTimeField(null=True, blank=True)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass LoadingArm(models.Model):\n    LOADING_TYPE_TOP = 'TOP'\n    LOADING_TYPE_BOTTOM = 'BOTTOM'\n    \n    loading_type = models.CharField(max_length=20)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass Order(models.Model):\n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass OrderItem(models.Model):\n    order = models.ForeignKey(Order, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass OrderItemResult(models.Model):\n    order_line = models.ForeignKey(OrderItem, on_delete=models.CASCADE)\n    loading_arm = models.ForeignKey(LoadingArm, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Test the queryset that was causing the issue\ndef test_aggregate_with_multiple_exists():\n    print(\"Testing aggregate with multiple Exists annotations...\")\n    print(\"=\"*80)\n    \n    # Build the queryset\n    qs = IndicatorValue.objects.values(\"freight\").annotate(\n        loading_time=Min(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_CREATED)) - Max(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_COMPLETED)),\n        has_top_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_TOP,\n            ).values('pk')\n        ),\n        has_bottom_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_BOTTOM,\n            ).values('pk')\n        )\n    )\n    \n    # Now add the aggregate with filter\n    from django.db.models import Min as MinAgg\n    \n    # Clone the queryset and add aggregate\n    aggregate_qs = qs._chain()\n    aggregate_qs.query.add_annotation(\n        MinAgg(\"loading_time\", filter=Q(has_top_loading=True, has_bottom_loading=False)),\n        alias='top_min',\n        is_summary=True\n    )\n    \n    # Get the SQL without executing\n    try:\n        sql, params = aggregate_qs.query.get_compiler(using='default').as_sql()\n        print(\"\\nGenerated SQL:\")\n        print(\"-\"*80)\n        print(sql)\n        print(\"-\"*80)\n        print(\"\\nParams:\", params)\n        print(\"=\"*80)\n        \n        # Analyze the FILTER clause\n        if 'FILTER' in sql:\n            filter_start = sql.upper().find('FILTER')\n            # Find the WHERE clause within FILTER\n            where_start = sql.find('WHERE', filter_start)\n            if where_start != -1:\n                # Find the closing parenthesis\n                paren_count = 0\n                where_end = where_start\n                for i in range(where_start, len(sql)):\n                    if sql[i] == '(':\n                        paren_count += 1\n                    elif sql[i] == ')':\n                        paren_count -= 1\n                        if paren_count == 0:\n                            where_end = i + 1\n                            break\n                \n                filter_clause = sql[filter_start:where_end]\n                print(\"\\nExtracted FILTER clause:\")\n                print(\"-\"*80)\n                print(filter_clause)\n                print(\"-\"*80)\n                \n                # Check for the bug\n                # Bug: both conditions reference the same alias (e.g., \"has_top_loading\" twice)\n                # Fix: conditions reference different aliases (\"has_top_loading\" and \"has_bottom_loading\")\n                \n                has_top_count = filter_clause.count('\"has_top_loading\"')\n                has_bottom_count = filter_clause.count('\"has_bottom_loading\"')\n                \n                print(f\"\\nAlias usage in FILTER clause:\")\n                print(f\"  'has_top_loading' appears: {has_top_count} time(s)\")\n                print(f\"  'has_bottom_loading' appears: {has_bottom_count} time(s)\")\n                \n                if has_top_count >= 1 and has_bottom_count >= 1:\n                    print(\"\\n\u2713 SUCCESS: Both distinct aliases appear in FILTER clause\")\n                    print(\"  The fix is working correctly!\")\n                    return True\n                elif has_top_count >= 2 or has_bottom_count >= 2:\n                    print(\"\\n\u2717 FAILURE: Same alias appears multiple times in FILTER clause\")\n                    print(\"  This indicates the bug is still present\")\n                    return False\n                else:\n                    print(\"\\n? UNCLEAR: Unexpected alias pattern\")\n                    return None\n        else:\n            print(\"\\nNo FILTER clause found in SQL\")\n            return None\n            \n    except Exception as e:\n        print(f\"\\nError generating SQL: {e}\")\n        import traceback\n        traceback.print_exc()\n        return None\n\nif __name__ == '__main__':\n    try:\n        result = test_aggregate_with_multiple_exists()\n        print(\"\\n\" + \"=\"*80)\n        if result:\n            print(\"TEST PASSED: The fix appears to be working correctly!\")\n            print(\"=\"*80)\n            sys.exit(0)\n        elif result is False:\n            print(\"TEST FAILED: The bug may still be present\")\n            print(\"=\"*80)\n            sys.exit(1)\n        else:\n            print(\"TEST INCONCLUSIVE: Could not determine if fix is working\")\n            print(\"=\"*80)\n            sys.exit(2)\n    except Exception as e:\n        print(f\"\\nUnexpected error: {e}\")\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.21625946396648732
+    "reward": 0.21626230699529028
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the updated test script that inspects SQL generation without executing queries:\n\n```bash\ncd /testbed && python test_aggregate_alias_fix.py\n```",
-    "reward": 0.36043243994414553
+    "reward": 0.36043717832548383
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The test had a Unicode encoding issue, but I can see from the output that the fix is actually working! The FILTER clause shows that both `has_top_loading` and `has_bottom_loading` appear once each, which means the fix is correct. However, the issue is that the FILTER clause extraction logic is capturing too much. Let me look at the actual aggregate FILTER clause more carefully. Looking at the SQL, I can see:\n\n`MIN(\"loading_time\") FILTER (WHERE (NOT EXISTS(...) AND EXISTS(...)))`\n\nThis shows that instead of using the aliases `has_top_loading` and `has_bottom_loading`, it's expanding the full EXISTS subqueries. This suggests the fix might not be working as expected, or there's a different issue. Let me create a better test to understand what's happening:\n\n```bash\ncat <<'EOF' > test_aggregate_alias_fix.py\n\"\"\"\nTest script to reproduce the aggregate alias bug described in the PR.\n\"\"\"\nimport os\nimport sys\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.postgresql',\n                'NAME': 'test_db',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import Q, Min, Max, Exists, OuterRef\n\nclass Freight(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test_app'\n\nclass IndicatorValue(models.Model):\n    TYPE_FREIGHT_CREATED = 'freight_created'\n    TYPE_FREIGHT_COMPLETED = 'freight_completed'\n    \n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    datetime = models.DateTimeField()\n    type = models.CharField(max_length=50)\n    deleted = models.DateTimeField(null=True, blank=True)\n    \n    class Meta:\n        app_label = 'test_app'\n\nclass LoadingArm(models.Model):\n    LOADING_TYPE_TOP = 'TOP'\n    LOADING_TYPE_BOTTOM = 'BOTTOM'\n    loading_type = models.CharField(max_length=20)\n    class Meta:\n        app_label = 'test_app'\n\nclass Order(models.Model):\n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n\nclass OrderItem(models.Model):\n    order = models.ForeignKey(Order, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n\nclass OrderItemResult(models.Model):\n    order_line = models.ForeignKey(OrderItem, on_delete=models.CASCADE)\n    loading_arm = models.ForeignKey(LoadingArm, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n\ndef test_aggregate_with_multiple_exists():\n    print(\"Testing aggregate with multiple Exists annotations...\")\n    print(\"=\"*80)\n    \n    qs = IndicatorValue.objects.values(\"freight\").annotate(\n        loading_time=Min(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_CREATED)) - Max(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_COMPLETED)),\n        has_top_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_TOP,\n            ).values('pk')\n        ),\n        has_bottom_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_BOTTOM,\n            ).values('pk')\n        )\n    )\n    \n    from django.db.models import Min as MinAgg\n    aggregate_qs = qs._chain()\n    aggregate_qs.query.add_annotation(\n        MinAgg(\"loading_time\", filter=Q(has_top_loading=True, has_bottom_loading=False)),\n        alias='top_min',\n        is_summary=True\n    )\n    \n    try:\n        sql, params = aggregate_qs.query.get_compiler(using='default').as_sql()\n        print(\"\\nGenerated SQL:\")\n        print(\"-\"*80)\n        # Format SQL for readability\n        formatted_sql = sql.replace(' FROM ', '\\nFROM ').replace(' WHERE ', '\\nWHERE ').replace(' GROUP BY ', '\\nGROUP BY ')\n        print(formatted_sql)\n        print(\"-\"*80)\n        \n        # Look for the aggregate FILTER clause specifically\n        # Find \"MIN(\" followed by \"FILTER\"\n        import re\n        # Match the aggregate MIN with FILTER\n        pattern = r'MIN\\([^)]+\\)\\s+FILTER\\s+\\(WHERE\\s+\\([^)]+\\)\\)'\n        matches = re.findall(pattern, sql, re.IGNORECASE)\n        \n        if matches:\n            print(\"\\nFound aggregate FILTER clause(s):\")\n            for i, match in enumerate(matches, 1):\n                print(f\"\\n  Match {i}:\")\n                print(f\"  {match}\")\n                \n                # Check for the bug pattern\n                if '\"has_top_loading\"' in match and '\"has_bottom_loading\"' in match:\n                    print(\"  -> GOOD: Both distinct aliases present\")\n                    return True\n                elif match.count('\"has_top_loading\"') > 1 or match.count('\"has_bottom_loading\"') > 1:\n                    print(\"  -> BAD: Same alias used multiple times\")\n                    return False\n        \n        # Alternative: look in the subquery's FILTER\n        if 'subquery' in sql.lower() or '(SELECT' in sql:\n            # Find the outer aggregate's FILTER\n            outer_filter_pattern = r'MIN\\(\"loading_time\"\\)\\s+FILTER\\s+\\(WHERE\\s+\\(([^)]+(?:\\([^)]*\\))*[^)]*)\\)\\)'\n            outer_matches = re.findall(outer_filter_pattern, sql, re.IGNORECASE | re.DOTALL)\n            \n            if outer_matches:\n                print(\"\\nFound outer aggregate FILTER condition:\")\n                for condition in outer_matches:\n                    print(f\"  {condition[:200]}...\")\n                    \n                    if '\"has_top_loading\"' in condition and '\"has_bottom_loading\"' in condition:\n                        print(\"  -> SUCCESS: Both distinct aliases present in FILTER\")\n                        return True\n                    elif condition.count('\"has_top_loading\"') > 1:\n                        print(\"  -> FAILURE: 'has_top_loading' appears multiple times\")\n                        return False\n                    elif condition.count('\"has_bottom_loading\"') > 1:\n                        print(\"  -> FAILURE: 'has_bottom_loading' appears multiple times\")\n                        return False\n        \n        print(\"\\nCould not definitively determine if fix is working from SQL pattern\")\n        return None\n            \n    except Exception as e:\n        print(f\"\\nError: {e}\")\n        import traceback\n        traceback.print_exc()\n        return None\n\nif __name__ == '__main__':\n    result = test_aggregate_with_multiple_exists()\n    print(\"\\n\" + \"=\"*80)\n    if result:\n        print(\"TEST PASSED\")\n        sys.exit(0)\n    elif result is False:\n        print(\"TEST FAILED\")\n        sys.exit(1)\n    else:\n        print(\"TEST INCONCLUSIVE\")\n        sys.exit(2)\nEOF\n```",
-    "reward": 0.18405406657357584
+    "reward": 0.1840619638758064
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this improved test script:\n\n```bash\ncd /testbed && python test_aggregate_alias_fix.py\n```",
-    "reward": 0.30675677762262643
+    "reward": 0.30676993979301065
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: PostgreSQL driver is not available. Let me switch back to SQLite and look more carefully at the actual SQL output. Let me also check the existing Django tests to understand how they test this functionality:\n\n```bash\nfind /testbed/tests -name \"*aggregat*\" -type f | head -10\n```",
-    "reward": 0.09459462937104401
+    "reward": 0.09461656632168439
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me look at the aggregation tests to understand how Django tests aggregate functionality:\n\n```bash\nfind /testbed/tests -path \"*/aggregation*\" -type d\n```",
-    "reward": 0.1576577156184067
+    "reward": 0.15769427720280732
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the aggregation tests directory to see how they test aggregate filtering:\n\n```bash\nls -la /testbed/tests/aggregation/\n```",
-    "reward": 0.26276285936401117
+    "reward": 0.2628237953380122
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me look at the test_filter_argument.py file since it's specifically about filter arguments in aggregates:\n\n```bash\nhead -100 /testbed/tests/aggregation/test_filter_argument.py\n```",
-    "reward": 0.43793809894001867
+    "reward": 0.43803965889668706
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I can see how Django tests filtered aggregates. Now let me run the existing Django aggregation tests to make sure my fix doesn't break anything:\n\n```bash\ncd /testbed && python -m pytest tests/aggregation/test_filter_argument.py -xvs\n```",
-    "reward": 0.6465634982333645
+    "reward": 0.6467327648278118
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me use Django's test runner instead:\n\n```bash\ncd /testbed && python tests/runtests.py aggregation.test_filter_argument -v 2\n```",
-    "reward": 0.5776058303889408
+    "reward": 0.5778879413796864
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! All the existing aggregation filter tests pass. Now let me create a more specific test to verify the fix for the reported issue. Let me create a simple script that directly tests the scenario from the PR description:\n\n```bash\ncat <<'EOF' > test_exists_alias_bug.py\n\"\"\"\nTest to verify the fix for the aggregate alias bug with multiple Exists annotations.\nThis reproduces the exact scenario from the PR description.\n\"\"\"\nimport os\nimport sys\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import Q, Min, Max, Exists, OuterRef\n\n# Define models inline\nclass Freight(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'freight'\n\nclass IndicatorValue(models.Model):\n    TYPE_FREIGHT_CREATED = 'freight_created'\n    TYPE_FREIGHT_COMPLETED = 'freight_completed'\n    \n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    datetime = models.DateTimeField()\n    type = models.CharField(max_length=50)\n    deleted = models.DateTimeField(null=True, blank=True)\n    \n    class Meta:\n        app_label = 'test_app'\n        db_table = 'indicator_value'\n\nclass LoadingArm(models.Model):\n    LOADING_TYPE_TOP = 'TOP'\n    LOADING_TYPE_BOTTOM = 'BOTTOM'\n    loading_type = models.CharField(max_length=20)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'loading_arm'\n\nclass Order(models.Model):\n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order'\n\nclass OrderItem(models.Model):\n    order = models.ForeignKey(Order, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order_item'\n\nclass OrderItemResult(models.Model):\n    order_line = models.ForeignKey(OrderItem, on_delete=models.CASCADE)\n    loading_arm = models.ForeignKey(LoadingArm, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order_item_result'\n\ndef test_bug():\n    \"\"\"Test the exact scenario from the PR description.\"\"\"\n    print(\"Testing the aggregate alias bug with multiple Exists annotations...\")\n    print(\"=\"*80)\n    \n    # Build the exact queryset from the PR description\n    qs = IndicatorValue.objects.values(\"freight\").annotate(\n        loading_time=Min(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_CREATED)) - Max(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_COMPLETED)),\n        has_top_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_TOP,\n            ).values('pk')\n        ),\n        has_bottom_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_BOTTOM,\n            ).values('pk')\n        )\n    )\n    \n    # Add the aggregate with filter\n    from django.db.models import Min as MinAgg\n    aggregate_qs = qs._chain()\n    aggregate_qs.query.add_annotation(\n        MinAgg(\"loading_time\", filter=Q(has_top_loading=True, has_bottom_loading=False)),\n        alias='top_min',\n        is_summary=True\n    )\n    \n    # Get the SQL\n    sql, params = aggregate_qs.query.get_compiler(using='default').as_sql()\n    \n    print(\"\\nGenerated SQL (formatted):\")\n    print(\"-\"*80)\n    # Pretty print the SQL\n    formatted = sql\n    for keyword in [' FROM ', ' WHERE ', ' GROUP BY ', ' FILTER ']:\n        formatted = formatted.replace(keyword, '\\n' + keyword)\n    print(formatted)\n    print(\"-\"*80)\n    \n    # Check for the bug\n    # The bug would show: FILTER (WHERE (\"has_top_loading\" = false AND \"has_top_loading\" = true))\n    # The fix should show: FILTER (WHERE (\"has_bottom_loading\" = false AND \"has_top_loading\" = true))\n    # or use the actual column references instead of aliases\n    \n    print(\"\\nAnalyzing the FILTER clause...\")\n    \n    # Find the aggregate's FILTER clause\n    import re\n    # Look for MIN(\"loading_time\") FILTER (WHERE ...)\n    filter_pattern = r'MIN\\(\"loading_time\"\\)\\s+FILTER\\s+\\(WHERE\\s+\\((.+?)\\)\\)'\n    match = re.search(filter_pattern, sql, re.IGNORECASE | re.DOTALL)\n    \n    if match:\n        filter_condition = match.group(1)\n        print(f\"\\nFILTER condition: {filter_condition[:200]}\")\n        \n        # Check if it references the aliases or expands the subqueries\n        if '\"has_top_loading\"' in filter_condition and '\"has_bottom_loading\"' in filter_condition:\n            # Count occurrences\n            top_count = filter_condition.count('\"has_top_loading\"')\n            bottom_count = filter_condition.count('\"has_bottom_loading\"')\n            \n            print(f\"\\nAlias usage:\")\n            print(f\"  'has_top_loading' appears: {top_count} time(s)\")\n            print(f\"  'has_bottom_loading' appears: {bottom_count} time(s)\")\n            \n            if top_count == 1 and bottom_count == 1:\n                print(\"\\n\u2713 SUCCESS: Each alias appears exactly once - fix is working!\")\n                return True\n            elif top_count > 1 or bottom_count > 1:\n                print(\"\\n\u2717 FAILURE: Same alias appears multiple times - bug is present!\")\n                print(\"  Expected: ('has_bottom_loading' = false AND 'has_top_loading' = true)\")\n                print(\"  Got: Same alias used for both conditions\")\n                return False\n        else:\n            # The query might be expanding the EXISTS subqueries instead of using aliases\n            print(\"\\nNote: Query is not using aliases in FILTER, expanding subqueries instead\")\n            print(\"This is acceptable behavior, though less efficient\")\n            return None\n    else:\n        print(\"\\nCould not find expected FILTER pattern in SQL\")\n        return None\n\nif __name__ == '__main__':\n    try:\n        result = test_bug()\n        print(\"\\n\" + \"=\"*80)\n        if result is True:\n            print(\"TEST PASSED: Fix is working correctly!\")\n            sys.exit(0)\n        elif result is False:\n            print(\"TEST FAILED: Bug is still present!\")\n            sys.exit(1)\n        else:\n            print(\"TEST INCONCLUSIVE: Could not determine from SQL pattern\")\n            sys.exit(2)\n    except Exception as e:\n        print(f\"\\nError: {e}\")\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.46267638398156796
+    "reward": 0.4631465689661439
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this test to see if the fix is working:\n\n```bash\ncd /testbed && python test_exists_alias_bug.py\n```",
-    "reward": 0.6044606399692799
+    "reward": 0.6052442816102399
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The test shows that the query is expanding the EXISTS subqueries instead of using the aliases. This is happening because the fix is working - it's not reusing the wrong alias, but it's also not finding a match with identity comparison, so it's falling through to the else clause that expands the expression. \n\nLet me check if this is actually the correct behavior by looking at what parameters are being passed. The key insight is that the two EXISTS expressions in the FILTER clause should be different (one for TOP, one for BOTTOM). Let me check the params:\n\n```bash\ncat <<'EOF' > test_params.py\n\"\"\"\nTest to check the parameters in the generated SQL.\n\"\"\"\nimport os\nimport sys\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import Q, Min, Max, Exists, OuterRef\n\nclass Freight(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'freight'\n\nclass IndicatorValue(models.Model):\n    TYPE_FREIGHT_CREATED = 'freight_created'\n    TYPE_FREIGHT_COMPLETED = 'freight_completed'\n    \n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    datetime = models.DateTimeField()\n    type = models.CharField(max_length=50)\n    deleted = models.DateTimeField(null=True, blank=True)\n    \n    class Meta:\n        app_label = 'test_app'\n        db_table = 'indicator_value'\n\nclass LoadingArm(models.Model):\n    LOADING_TYPE_TOP = 'TOP'\n    LOADING_TYPE_BOTTOM = 'BOTTOM'\n    loading_type = models.CharField(max_length=20)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'loading_arm'\n\nclass Order(models.Model):\n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order'\n\nclass OrderItem(models.Model):\n    order = models.ForeignKey(Order, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order_item'\n\nclass OrderItemResult(models.Model):\n    order_line = models.ForeignKey(OrderItem, on_delete=models.CASCADE)\n    loading_arm = models.ForeignKey(LoadingArm, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order_item_result'\n\ndef test_params():\n    \"\"\"Check the parameters to see if they're correct.\"\"\"\n    print(\"Checking SQL parameters...\")\n    print(\"=\"*80)\n    \n    qs = IndicatorValue.objects.values(\"freight\").annotate(\n        loading_time=Min(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_CREATED)) - Max(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_COMPLETED)),\n        has_top_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_TOP,\n            ).values('pk')\n        ),\n        has_bottom_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_BOTTOM,\n            ).values('pk')\n        )\n    )\n    \n    from django.db.models import Min as MinAgg\n    aggregate_qs = qs._chain()\n    aggregate_qs.query.add_annotation(\n        MinAgg(\"loading_time\", filter=Q(has_top_loading=True, has_bottom_loading=False)),\n        alias='top_min',\n        is_summary=True\n    )\n    \n    sql, params = aggregate_qs.query.get_compiler(using='default').as_sql()\n    \n    print(\"\\nParameters:\")\n    for i, param in enumerate(params, 1):\n        print(f\"  {i}. {param}\")\n    \n    print(\"\\n\" + \"=\"*80)\n    \n    # The bug would show the same loading_type value twice in the FILTER clause\n    # The fix should show different values (BOTTOM and TOP)\n    \n    # Expected params order:\n    # 1. freight_created (for Min datetime filter)\n    # 2. freight_completed (for Max datetime filter)\n    # 3. TOP (for has_top_loading annotation)\n    # 4. BOTTOM (for has_bottom_loading annotation)\n    # 5. BOTTOM (for has_bottom_loading=False in aggregate filter)\n    # 6. TOP (for has_top_loading=True in aggregate filter)\n    \n    if len(params) >= 6:\n        print(\"\\nAnalyzing aggregate FILTER parameters (last 2):\")\n        print(f\"  Parameter 5: {params[4]} (should be BOTTOM for has_bottom_loading=False)\")\n        print(f\"  Parameter 6: {params[5]} (should be TOP for has_top_loading=True)\")\n        \n        if params[4] == 'BOTTOM' and params[5] == 'TOP':\n            print(\"\\n\u2713 SUCCESS: Parameters are correct - different loading types!\")\n            print(\"  The fix is working correctly!\")\n            return True\n        elif params[4] == params[5]:\n            print(f\"\\n\u2717 FAILURE: Both parameters are '{params[4]}' - bug is present!\")\n            print(\"  The same alias is being used for both conditions!\")\n            return False\n        else:\n            print(\"\\n? UNCLEAR: Unexpected parameter values\")\n            return None\n    else:\n        print(f\"\\nUnexpected number of parameters: {len(params)}\")\n        return None\n\nif __name__ == '__main__':\n    try:\n        result = test_params()\n        print(\"\\n\" + \"=\"*80)\n        if result is True:\n            print(\"TEST PASSED\")\n            sys.exit(0)\n        elif result is False:\n            print(\"TEST FAILED\")\n            sys.exit(1)\n        else:\n            print(\"TEST INCONCLUSIVE\")\n            sys.exit(2)\n    except Exception as e:\n        print(f\"\\nError: {e}\")\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.5074343999487999
+    "reward": 0.5087404693504
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this test to check the parameters:\n\n```bash\ncd /testbed && python test_params.py\n```",
-    "reward": 0.6790573332479999
+    "reward": 0.6812341155839999
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The parameters show that the fix is working correctly! The last two parameters are 'BOTTOM' and 'TOP', which means the two different EXISTS expressions are being used correctly in the FILTER clause. The bug would have shown the same value twice (e.g., 'TOP' and 'TOP' or 'BOTTOM' and 'BOTTOM').\n\nNow let me run the full aggregation test suite to make sure the fix doesn't break anything:\n\n```bash\ncd /testbed && python tests/runtests.py aggregation -v 2 2>&1 | head -100\n```",
-    "reward": 0.6317622220799999
+    "reward": 0.63539019264
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The tests are passing. Let me see the full test results:\n\n```bash\ncd /testbed && python tests/runtests.py aggregation -v 2 2>&1 | tail -20\n```",
-    "reward": 0.5529370368
+    "reward": 0.5589836544
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All 80 aggregation tests pass. Now let me also run the aggregation_regress tests to be thorough:\n\n```bash\ncd /testbed && python tests/runtests.py aggregation_regress -v 2 2>&1 | tail -20\n```",
-    "reward": 0.42156172799999997
+    "reward": 0.431639424
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me verify the fix one more time by looking at the actual change I made:\n\n```bash\nnl -ba django/db/models/sql/query.py | sed -n '391,400p'\n```",
-    "reward": 0.20260287999999999
+    "reward": 0.21939904
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix is in place. Let me create one final comprehensive test to document the fix and verify it works correctly:\n\n```bash\ncat <<'EOF' > final_verification_test.py\n\"\"\"\nFinal verification test for the aggregate alias bug fix.\n\nThis test verifies that when using multiple Exists annotations in a queryset\nand then filtering an aggregate by those annotations, each annotation is \ncorrectly referenced (not collapsed into a single alias).\n\nBug: Before the fix, two different Exists expressions that compared equal\n     would be treated as the same annotation, causing the wrong alias to be\n     used in the aggregate FILTER clause.\n\nFix: Use identity comparison (is) instead of equality (==) when matching\n     expressions to previously selected annotations in Query.rewrite_cols().\n\"\"\"\nimport os\nimport sys\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import Q, Min, Max, Exists, OuterRef\n\n# Define test models\nclass Freight(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'freight'\n\nclass IndicatorValue(models.Model):\n    TYPE_FREIGHT_CREATED = 'freight_created'\n    TYPE_FREIGHT_COMPLETED = 'freight_completed'\n    \n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    datetime = models.DateTimeField()\n    type = models.CharField(max_length=50)\n    deleted = models.DateTimeField(null=True, blank=True)\n    \n    class Meta:\n        app_label = 'test_app'\n        db_table = 'indicator_value'\n\nclass LoadingArm(models.Model):\n    LOADING_TYPE_TOP = 'TOP'\n    LOADING_TYPE_BOTTOM = 'BOTTOM'\n    loading_type = models.CharField(max_length=20)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'loading_arm'\n\nclass Order(models.Model):\n    freight = models.ForeignKey(Freight, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order'\n\nclass OrderItem(models.Model):\n    order = models.ForeignKey(Order, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order_item'\n\nclass OrderItemResult(models.Model):\n    order_line = models.ForeignKey(OrderItem, on_delete=models.CASCADE)\n    loading_arm = models.ForeignKey(LoadingArm, on_delete=models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n        db_table = 'order_item_result'\n\ndef main():\n    print(\"=\"*80)\n    print(\"FINAL VERIFICATION TEST\")\n    print(\"Testing aggregate alias bug fix with multiple Exists annotations\")\n    print(\"=\"*80)\n    \n    # Build the queryset from the PR description\n    qs = IndicatorValue.objects.values(\"freight\").annotate(\n        loading_time=Min(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_CREATED)) - Max(\"datetime\", filter=Q(type=IndicatorValue.TYPE_FREIGHT_COMPLETED)),\n        has_top_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_TOP,\n            ).values('pk')\n        ),\n        has_bottom_loading=Exists(\n            OrderItemResult.objects.order_by().filter(\n                order_line__order__freight=OuterRef(\"freight\"),\n                loading_arm__loading_type=LoadingArm.LOADING_TYPE_BOTTOM,\n            ).values('pk')\n        )\n    )\n    \n    # Add aggregate with filter referencing both annotations\n    from django.db.models import Min as MinAgg\n    aggregate_qs = qs._chain()\n    aggregate_qs.query.add_annotation(\n        MinAgg(\"loading_time\", filter=Q(has_top_loading=True, has_bottom_loading=False)),\n        alias='top_min',\n        is_summary=True\n    )\n    \n    # Get SQL and parameters\n    sql, params = aggregate_qs.query.get_compiler(using='default').as_sql()\n    \n    print(\"\\nGenerated SQL parameters:\")\n    for i, param in enumerate(params, 1):\n        print(f\"  {i}. {param}\")\n    \n    # Verify the fix\n    print(\"\\n\" + \"-\"*80)\n    print(\"VERIFICATION:\")\n    print(\"-\"*80)\n    \n    # The key test: parameters 5 and 6 should be different\n    # Parameter 5 should be 'BOTTOM' (for has_bottom_loading=False)\n    # Parameter 6 should be 'TOP' (for has_top_loading=True)\n    \n    if len(params) >= 6:\n        param5 = params[4]  # 0-indexed\n        param6 = params[5]\n        \n        print(f\"\\nAggregate FILTER parameters:\")\n        print(f\"  Parameter 5 (has_bottom_loading=False): {param5}\")\n        print(f\"  Parameter 6 (has_top_loading=True): {param6}\")\n        \n        if param5 == 'BOTTOM' and param6 == 'TOP':\n            print(\"\\n[PASS] Parameters are correct!\")\n            print(\"  - Different Exists expressions are correctly distinguished\")\n            print(\"  - Each annotation maintains its own identity\")\n            print(\"  - The fix is working as expected\")\n            return True\n        elif param5 == param6:\n            print(f\"\\n[FAIL] Both parameters are '{param5}'!\")\n            print(\"  - The bug is still present\")\n            print(\"  - Same alias is being used for different annotations\")\n            return False\n        else:\n            print(f\"\\n[UNEXPECTED] Parameters are {param5} and {param6}\")\n            return None\n    else:\n        print(f\"\\n[ERROR] Expected at least 6 parameters, got {len(params)}\")\n        return None\n\nif __name__ == '__main__':\n    try:\n        result = main()\n        print(\"\\n\" + \"=\"*80)\n        if result is True:\n            print(\"FINAL RESULT: TEST PASSED - Fix is working correctly!\")\n            print(\"=\"*80)\n            sys.exit(0)\n        elif result is False:\n            print(\"FINAL RESULT: TEST FAILED - Bug is still present!\")\n            print(\"=\"*80)\n            sys.exit(1)\n        else:\n            print(\"FINAL RESULT: TEST INCONCLUSIVE\")\n            print(\"=\"*80)\n            sys.exit(2)\n    except Exception as e:\n        print(f\"\\nERROR: {e}\")\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.42100479999999996
+    "reward": 0.4489984
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the final verification test:\n\n```bash\ncd /testbed && python final_verification_test.py\n```",
-    "reward": 0.5350079999999999
+    "reward": 0.581664
   },
   {
     "role": "user",
@@ -407,7 +407,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix is working correctly. Now let me verify the changes one more time and prepare to submit:\n\n```bash\ncd /testbed && git diff django/db/models/sql/query.py\n```",
-    "reward": 0.39168
+    "reward": 0.4694399999999999
   },
   {
     "role": "user",
@@ -421,7 +421,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix is minimal, well-documented, and correct. Let me run a broader set of tests to ensure nothing else is broken:\n\n```bash\ncd /testbed && python tests/runtests.py queries expressions annotations -v 0 2>&1 | tail -30\n```",
-    "reward": 0.6527999999999999
+    "reward": 0.7823999999999999
   },
   {
     "role": "user",
@@ -435,7 +435,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Let me also check if there are any other tests related to filtering and subqueries:\n\n```bash\ncd /testbed && python tests/runtests.py lookup subqueries -v 0 2>&1 | tail -20\n```",
-    "reward": 0.588
+    "reward": 0.8039999999999998
   },
   {
     "role": "user",
@@ -449,7 +449,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The subqueries module doesn't exist as a standalone test, but lookup tests passed. Let me check for tests specifically related to Exists:\n\n```bash\ncd /testbed && python tests/runtests.py queries.test_exists -v 0 2>&1 | tail -20\n```",
-    "reward": 0.48
+    "reward": 0.8399999999999999
   },
   {
     "role": "user",
@@ -466,7 +466,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me just run the queries tests to be comprehensive:\n\n```bash\ncd /testbed && python tests/runtests.py queries -v 0 2>&1 | tail -20\n```",
-    "reward": 0.3
+    "reward": 0.8999999999999999
   },
   {
     "role": "user",
@@ -483,7 +483,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me create a summary of the changes and submit the final output:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 1.0
   },
   {
     "role": "user",

@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the PR description, particularly `django/db/models/base.py` where `ModelBase` is defined.\n\n```bash\nfind /testbed -type f -name \"base.py\" | grep -E \"models/base\\.py$\" | head -5\n```",
-    "reward": 0.09754904361966855
+    "reward": 0.09754905393409334
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the file at `/testbed/django/db/models/base.py`. Let me examine this file to understand the current implementation of `ModelBase.__new__` and identify where the issue occurs.\n\n```bash\nhead -100 /testbed/django/db/models/base.py\n```",
-    "reward": 0.16258173936611425
+    "reward": 0.16258175655682225
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me continue reading the `ModelBase.__new__` method to see the complete implementation and understand where attributes are being popped.\n\n```bash\nsed -n '65,200p' /testbed/django/db/models/base.py\n```",
-    "reward": 0.020969565610190425
+    "reward": 0.02096959426137042
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me continue reading to see the rest of the `__new__` method and find where it returns.\n\n```bash\nsed -n '200,300p' /testbed/django/db/models/base.py\n```",
-    "reward": 0.03494927601698404
+    "reward": 0.0349493237689507
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me continue reading to find the return statement(s) in the `__new__` method.\n\n```bash\nsed -n '300,400p' /testbed/django/db/models/base.py\n```",
-    "reward": 0.058248793361640065
+    "reward": 0.058248872948251165
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I understand the issue. In the `ModelBase.__new__` method, around lines 87-89, there's a loop that pops attributes from the `attrs` dict if they don't have a `contribute_to_class` method:\n\n```python\nfor obj_name, obj in list(attrs.items()):\n    if not _has_contribute_to_class(obj):\n        new_attrs[obj_name] = attrs.pop(obj_name)\n```\n\nThis mutates the `attrs` dict in-place, removing non-field attributes. When Python's metaclass protocol calls `__init__` after `__new__` returns, it passes the same `attrs` dict, but now it's missing those attributes.\n\nAccording to the previous attempt analysis and the new plan, the fix is to:\n1. Save a copy of the original `attrs` at the start of `__new__`\n2. Restore `attrs` to the original state just before returning (both return paths)\n\nLet me first create a test script to reproduce the issue:\n\n```bash\ncat <<'EOF' > /testbed/test_metaclass_issue.py\n\"\"\"Test script to reproduce the custom metaclass issue.\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\n\n# Test case from the PR description\nclass PageBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(PageBase, cls).__init__(name, bases, dct)\n        if 'magic' in dct:\n            print(\"enabling magic on %s\" % (name))\n\nclass Page(models.Model, metaclass=PageBase):\n    magic = True\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"Test completed successfully!\")\nEOF\n```",
-    "reward": 0.09708132226940011
+    "reward": 0.09708145491375195
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this test script to confirm the issue exists:\n\n```bash\ncd /testbed && python test_metaclass_issue.py\n```",
-    "reward": -0.004864462884333158
+    "reward": -0.004864241810413436
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Interesting - the test completed but didn't print \"enabling magic on Page\", which confirms the issue. The `magic` attribute is not in the `dct` dict when `__init__` is called because it was popped in `__new__`.\n\nNow let me implement the fix according to the plan. I need to:\n1. Save a copy of the original `attrs` at the start of `__new__`\n2. Restore `attrs` to the original state just before both return statements\n\nLet me view the exact lines around the return statements to understand the structure better:\n\n```bash\nsed -n '68,315p' /testbed/django/db/models/base.py | grep -n \"return new_class\" -B 5 -A 2\n```",
-    "reward": -0.008107438140555263
+    "reward": -0.008107069684022394
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see there are two return statements:\n1. Line 241 (around line 308 in the actual file): `return new_class` for abstract models\n2. Line 245 (around line 312 in the actual file): `return new_class` for non-abstract models\n\nNow I'll implement the fix. I need to:\n1. Add `orig_attrs = attrs.copy()` early in the `__new__` method (right after checking for parents)\n2. Add `attrs.update(orig_attrs)` before both return statements\n3. Add a comment explaining why this is needed\n\nLet me create the fix:\n\n```bash\ncat <<'EOF' > /tmp/fix_modelbase.py\nimport sys\n\n# Read the file\nwith open('/testbed/django/db/models/base.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the line numbers we need to modify\n# 1. After \"if not parents:\" check, add orig_attrs = attrs.copy()\n# 2. Before both \"return new_class\" statements, add attrs.update(orig_attrs)\n\nnew_lines = []\ni = 0\nwhile i < len(lines):\n    line = lines[i]\n    \n    # After the \"if not parents:\" return, add the orig_attrs copy\n    if i > 0 and 'if not parents:' in lines[i-1] and 'return super_new(cls, name, bases, attrs)' in line:\n        new_lines.append(line)\n        # Add the orig_attrs copy right after this early return\n        # We need to add it before the early return actually, so let's handle this differently\n        i += 1\n        continue\n    \n    # Better approach: add orig_attrs right after the parents check but before any processing\n    if 'if not parents:' in line and i+1 < len(lines) and 'return super_new' in lines[i+1]:\n        new_lines.append(line)\n        i += 1\n        new_lines.append(lines[i])  # the return statement\n        # Now add the orig_attrs after the early return\n        i += 1\n        # Add a blank line and comment\n        new_lines.append('\\n')\n        new_lines.append('        # Save original attrs to restore later for custom metaclass __init__\\n')\n        new_lines.append('        # compatibility (see ticket #30422)\\n')\n        new_lines.append('        orig_attrs = attrs.copy()\\n')\n        continue\n    \n    # Before \"return new_class\" statements, add attrs.update(orig_attrs)\n    if 'return new_class' in line and 'new_class = super_new' not in line:\n        # Add the restore before the return\n        indent = len(line) - len(line.lstrip())\n        new_lines.append(' ' * indent + 'attrs.update(orig_attrs)\\n')\n        new_lines.append(line)\n        i += 1\n        continue\n    \n    new_lines.append(line)\n    i += 1\n\n# Write the modified file\nwith open('/testbed/django/db/models/base.py', 'w') as f:\n    f.writelines(new_lines)\n\nprint(\"File modified successfully\")\nEOF\npython /tmp/fix_modelbase.py\n```",
-    "reward": -0.01351239690092544
+    "reward": -0.013511782806703992
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me verify the changes were applied correctly by viewing the relevant sections of the modified file:\n\n```bash\nsed -n '68,85p' /testbed/django/db/models/base.py\n```",
-    "reward": -0.0225206615015424
+    "reward": -0.02251963801117332
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! The `orig_attrs = attrs.copy()` was added. Now let me check if the restore was added before the return statements:\n\n```bash\nsed -n '300,315p' /testbed/django/db/models/base.py\n```",
-    "reward": -0.037534435835904
+    "reward": -0.0375327300186222
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! Let me check the second return statement:\n\n```bash\nsed -n '315,320p' /testbed/django/db/models/base.py\n```",
-    "reward": -0.06255739305984
+    "reward": -0.062554550031037
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Both return statements now have `attrs.update(orig_attrs)` before them. Now let me test if the fix works by running the test script again:\n\n```bash\ncd /testbed && python test_metaclass_issue.py\n```",
-    "reward": -0.10426232176639999
+    "reward": -0.10425758338506168
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works - now \"enabling magic on Page\" is printed, which means the `magic` attribute is present in the `dct` dict when the custom metaclass's `__init__` is called.\n\nLet me create a more comprehensive test to verify edge cases:\n\n```bash\ncat <<'EOF' > /testbed/test_metaclass_comprehensive.py\n\"\"\"Comprehensive test for custom metaclass with various scenarios.\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\n\nprint(\"Test 1: Basic custom metaclass with non-field attribute\")\nclass PageBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(PageBase, cls).__init__(name, bases, dct)\n        if 'magic' in dct:\n            print(f\"  \u2713 Found 'magic' in {name}\")\n        else:\n            print(f\"  \u2717 'magic' NOT found in {name}\")\n\nclass Page(models.Model, metaclass=PageBase):\n    magic = True\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\nTest 2: Abstract model with custom metaclass\")\nclass AbstractPageBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(AbstractPageBase, cls).__init__(name, bases, dct)\n        if 'abstract_magic' in dct:\n            print(f\"  \u2713 Found 'abstract_magic' in {name}\")\n        else:\n            print(f\"  \u2717 'abstract_magic' NOT found in {name}\")\n\nclass AbstractPage(models.Model, metaclass=AbstractPageBase):\n    abstract_magic = True\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        abstract = True\n        app_label = 'test_app'\n\nprint(\"\\nTest 3: Wagtail-like pattern with multiple attributes\")\nclass WagtailBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(WagtailBase, cls).__init__(name, bases, dct)\n        found_attrs = []\n        for attr in ['is_creatable', 'template', 'custom_setting']:\n            if attr in dct:\n                found_attrs.append(attr)\n        if found_attrs:\n            print(f\"  \u2713 Found attributes in {name}: {', '.join(found_attrs)}\")\n        else:\n            print(f\"  \u2717 No custom attributes found in {name}\")\n\nclass WagtailPage(models.Model, metaclass=WagtailBase):\n    is_creatable = True\n    template = 'page.html'\n    custom_setting = {'key': 'value'}\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\nTest 4: Method definitions should still be accessible\")\nclass MethodCheckBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(MethodCheckBase, cls).__init__(name, bases, dct)\n        if 'custom_method' in dct:\n            print(f\"  \u2713 Found 'custom_method' in {name}\")\n        else:\n            print(f\"  \u2717 'custom_method' NOT found in {name}\")\n\nclass MethodPage(models.Model, metaclass=MethodCheckBase):\n    title = models.CharField(max_length=255)\n    \n    def custom_method(self):\n        return \"test\"\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\nTest 5: Mix of fields and non-field attributes\")\nclass MixedBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(MixedBase, cls).__init__(name, bases, dct)\n        has_field = 'title' in dct\n        has_nonfield = 'config' in dct\n        print(f\"  Field 'title' in dct: {has_field}\")\n        print(f\"  Non-field 'config' in dct: {has_nonfield}\")\n\nclass MixedPage(models.Model, metaclass=MixedBase):\n    config = {'setting': 'value'}\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\nAll tests completed!\")\nEOF\n```",
-    "reward": -0.09043720294399998
+    "reward": -0.09042930564176946
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this comprehensive test:\n\n```bash\ncd /testbed && python test_metaclass_comprehensive.py\n```",
-    "reward": -0.31739533824
+    "reward": -0.3173821760696158
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The Unicode characters are causing issues. Let me fix the test script to use simple ASCII characters:\n\n```bash\ncat <<'EOF' > /testbed/test_metaclass_comprehensive.py\n\"\"\"Comprehensive test for custom metaclass with various scenarios.\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\n\nprint(\"Test 1: Basic custom metaclass with non-field attribute\")\nclass PageBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(PageBase, cls).__init__(name, bases, dct)\n        if 'magic' in dct:\n            print(\"  PASS: Found 'magic' in %s\" % name)\n        else:\n            print(\"  FAIL: 'magic' NOT found in %s\" % name)\n\nclass Page(models.Model, metaclass=PageBase):\n    magic = True\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\nTest 2: Abstract model with custom metaclass\")\nclass AbstractPageBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(AbstractPageBase, cls).__init__(name, bases, dct)\n        if 'abstract_magic' in dct:\n            print(\"  PASS: Found 'abstract_magic' in %s\" % name)\n        else:\n            print(\"  FAIL: 'abstract_magic' NOT found in %s\" % name)\n\nclass AbstractPage(models.Model, metaclass=AbstractPageBase):\n    abstract_magic = True\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        abstract = True\n        app_label = 'test_app'\n\nprint(\"\\nTest 3: Wagtail-like pattern with multiple attributes\")\nclass WagtailBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(WagtailBase, cls).__init__(name, bases, dct)\n        found_attrs = []\n        for attr in ['is_creatable', 'template', 'custom_setting']:\n            if attr in dct:\n                found_attrs.append(attr)\n        if found_attrs:\n            print(\"  PASS: Found attributes in %s: %s\" % (name, ', '.join(found_attrs)))\n        else:\n            print(\"  FAIL: No custom attributes found in %s\" % name)\n\nclass WagtailPage(models.Model, metaclass=WagtailBase):\n    is_creatable = True\n    template = 'page.html'\n    custom_setting = {'key': 'value'}\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\nTest 4: Method definitions should still be accessible\")\nclass MethodCheckBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(MethodCheckBase, cls).__init__(name, bases, dct)\n        if 'custom_method' in dct:\n            print(\"  PASS: Found 'custom_method' in %s\" % name)\n        else:\n            print(\"  FAIL: 'custom_method' NOT found in %s\" % name)\n\nclass MethodPage(models.Model, metaclass=MethodCheckBase):\n    title = models.CharField(max_length=255)\n    \n    def custom_method(self):\n        return \"test\"\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\nTest 5: Mix of fields and non-field attributes\")\nclass MixedBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(MixedBase, cls).__init__(name, bases, dct)\n        has_field = 'title' in dct\n        has_nonfield = 'config' in dct\n        print(\"  Field 'title' in dct: %s\" % has_field)\n        print(\"  Non-field 'config' in dct: %s\" % has_nonfield)\n\nclass MixedPage(models.Model, metaclass=MixedBase):\n    config = {'setting': 'value'}\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\nAll tests completed!\")\nEOF\n```",
-    "reward": -0.0289922304
+    "reward": -0.02897029344935962
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the comprehensive test again:\n\n```bash\ncd /testbed && python test_metaclass_comprehensive.py\n```",
-    "reward": -0.048320384
+    "reward": -0.04828382241559937
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me run some of Django's existing tests to make sure we haven't broken anything. Let me start with model-related tests:\n\n```bash\ncd /testbed && python -m pytest tests/model_meta/tests.py -xvs 2>&1 | head -100\n```",
-    "reward": 0.0027993599999999994
+    "reward": 0.0028602959740010483
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me use Django's test runner instead:\n\n```bash\ncd /testbed && python tests/runtests.py model_meta --verbosity=2 2>&1 | head -150\n```",
-    "reward": 0.004665599999999999
+    "reward": 0.004767159956668414
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! Let me also test model inheritance which is particularly relevant:\n\n```bash\ncd /testbed && python tests/runtests.py model_inheritance --verbosity=2 2>&1 | head -150\n```",
-    "reward": 0.007775999999999998
+    "reward": 0.007945266594447357
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All model inheritance tests pass. Let me also run a few more critical test suites to ensure our change doesn't break anything:\n\n```bash\ncd /testbed && python tests/runtests.py migrations.test_operations --verbosity=2 2>&1 | tail -50\n```",
-    "reward": 0.012959999999999998
+    "reward": 0.013242110990745596
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All migration operation tests pass. Let me also test the basic model tests to ensure we haven't broken anything fundamental:\n\n```bash\ncd /testbed && python tests/runtests.py basic --verbosity=2 2>&1 | tail -50\n```",
-    "reward": 0.021599999999999998
+    "reward": 0.022070184984575993
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me verify the fix one more time by looking at the complete modified section of the code to ensure it's correct:\n\n```bash\nsed -n '68,320p' /testbed/django/db/models/base.py | head -80\n```",
-    "reward": 0.036
+    "reward": 0.03678364164095999
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the return statements to ensure the restore is in place:\n\n```bash\nsed -n '305,320p' /testbed/django/db/models/base.py\n```",
-    "reward": 0.06
+    "reward": 0.061306069401599994
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix is correctly implemented. Let me create one final comprehensive test that specifically tests the exact scenario from the PR description and the Wagtail use case:\n\n```bash\ncat <<'EOF' > /testbed/test_final_validation.py\n\"\"\"Final validation test matching the exact PR description scenario.\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\n\nprint(\"=\" * 70)\nprint(\"Test 1: Exact scenario from PR description\")\nprint(\"=\" * 70)\n\nclass PageBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(PageBase, cls).__init__(name, bases, dct)\n        if 'magic' in dct:\n            print(\"enabling magic on %s\" % (name))\n\nclass Page(models.Model, metaclass=PageBase):\n    magic = True\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"Test 2: Wagtail-like pattern (from GitHub link in PR)\")\nprint(\"=\" * 70)\n\nclass WagtailPageBase(models.base.ModelBase):\n    \"\"\"Simulates Wagtail's Page metaclass pattern.\"\"\"\n    def __init__(cls, name, bases, dct):\n        super(WagtailPageBase, cls).__init__(name, bases, dct)\n        \n        # Check for various class attributes that Wagtail looks for\n        attrs_found = []\n        for attr_name in ['is_creatable', 'template', 'content_panels', 'search_fields']:\n            if attr_name in dct:\n                attrs_found.append(attr_name)\n        \n        if attrs_found:\n            print(\"Wagtail-like processing for %s: found %s\" % (name, ', '.join(attrs_found)))\n\nclass WagtailPage(models.Model, metaclass=WagtailPageBase):\n    is_creatable = True\n    template = 'wagtail/page.html'\n    content_panels = []\n    search_fields = []\n    \n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"Test 3: Verify fields are still properly handled\")\nprint(\"=\" * 70)\n\nclass FieldCheckBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(FieldCheckBase, cls).__init__(name, bases, dct)\n        # Check that both field and non-field attributes are present\n        has_title = 'title' in dct\n        has_config = 'config' in dct\n        print(\"Class %s - title field in dct: %s, config attr in dct: %s\" % (name, has_title, has_config))\n\nclass TestModel(models.Model, metaclass=FieldCheckBase):\n    config = {'key': 'value'}\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"Test 4: Abstract model with custom metaclass\")\nprint(\"=\" * 70)\n\nclass AbstractBase(models.base.ModelBase):\n    def __init__(cls, name, bases, dct):\n        super(AbstractBase, cls).__init__(name, bases, dct)\n        if 'abstract_attr' in dct:\n            print(\"Found abstract_attr in %s\" % name)\n\nclass AbstractModel(models.Model, metaclass=AbstractBase):\n    abstract_attr = \"test\"\n    title = models.CharField(max_length=255)\n    \n    class Meta:\n        abstract = True\n        app_label = 'test_app'\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"All validation tests completed successfully!\")\nprint(\"=\" * 70)\nEOF\n```",
-    "reward": 0.1
+    "reward": 0.102176782336
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this final validation test:\n\n```bash\ncd /testbed && python test_final_validation.py\n```",
-    "reward": 0.0
+    "reward": 0.0036279705599999994
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me review the changes one more time to ensure they are complete and correct. Let me also add a more detailed comment explaining the fix as suggested in the feedback:\n\n```bash\ncat <<'EOF' > /tmp/improve_comment.py\nimport sys\n\n# Read the file\nwith open('/testbed/django/db/models/base.py', 'r') as f:\n    content = f.read()\n\n# Replace the comment with a more detailed one\nold_comment = \"\"\"        # Save original attrs to restore later for custom metaclass __init__\n        # compatibility (see ticket #30422)\n        orig_attrs = attrs.copy()\"\"\"\n\nnew_comment = \"\"\"        # Save original attrs to restore later for custom metaclass __init__\n        # compatibility. When a custom metaclass subclasses ModelBase and\n        # overrides __init__, it expects to receive the original class namespace\n        # dict (attrs) with all attributes present. However, ModelBase.__new__\n        # pops non-field attributes from attrs during class creation. We restore\n        # attrs before returning so Python's metaclass protocol passes the\n        # complete namespace to __init__. See ticket #30422.\n        orig_attrs = attrs.copy()\"\"\"\n\ncontent = content.replace(old_comment, new_comment)\n\n# Write back\nwith open('/testbed/django/db/models/base.py', 'w') as f:\n    f.write(content)\n\nprint(\"Comment improved successfully\")\nEOF\npython /tmp/improve_comment.py\n```",
-    "reward": 0.0
+    "reward": 0.006046617599999999
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me verify the improved comment was added correctly:\n\n```bash\nsed -n '77,85p' /testbed/django/db/models/base.py\n```",
-    "reward": 0.0
+    "reward": 0.010077695999999999
   },
   {
     "role": "user",
@@ -407,7 +407,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Now let me run the tests one more time to ensure everything still works with the improved comment:\n\n```bash\ncd /testbed && python test_final_validation.py && echo \"---\" && python test_metaclass_comprehensive.py\n```",
-    "reward": 0.0
+    "reward": 0.016796159999999997
   },
   {
     "role": "user",
@@ -421,7 +421,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Let me run one more comprehensive Django test suite to ensure there are no regressions:\n\n```bash\ncd /testbed && python tests/runtests.py model_fields --verbosity=2 2>&1 | tail -30\n```",
-    "reward": 0.0
+    "reward": 0.027993599999999997
   },
   {
     "role": "user",
@@ -435,7 +435,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check if the tests passed by looking at the summary:\n\n```bash\ncd /testbed && python tests/runtests.py model_fields --verbosity=1 2>&1 | grep -E \"(OK|FAILED|Ran [0-9]+ test)\"\n```",
-    "reward": 0.0
+    "reward": 0.046655999999999996
   },
   {
     "role": "user",
@@ -449,7 +449,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me create a summary of the changes and verify the final state of the code:\n\n```bash\ncat <<'EOF' > /testbed/CHANGES_SUMMARY.md\n# Summary of Changes to Fix Custom Model Metaclass Issue\n\n## Problem\nIn Django 2.2.x (after commit a68ea231012434b522ce45c513d84add516afa60), custom metaclasses \nthat subclass `ModelBase` could no longer access non-field attributes in their `__init__` method.\nThis broke frameworks like Wagtail that rely on this pattern.\n\n## Root Cause\nIn `ModelBase.__new__`, non-field attributes were being popped from the `attrs` dict in-place:\n```python\nfor obj_name, obj in list(attrs.items()):\n    if not _has_contribute_to_class(obj):\n        new_attrs[obj_name] = attrs.pop(obj_name)\n```\n\nSince Python's metaclass protocol passes the same `attrs` dict to `__init__` after `__new__` \nreturns, the custom metaclass's `__init__` received a modified dict missing these attributes.\n\n## Solution\nThe fix preserves the original `attrs` dict for the metaclass `__init__` by:\n\n1. Saving a copy of `attrs` at the start of `__new__`: `orig_attrs = attrs.copy()`\n2. Restoring `attrs` before both return statements: `attrs.update(orig_attrs)`\n\nThis ensures:\n- Django's internal class creation logic works unchanged (using the modified attrs)\n- Custom metaclass `__init__` methods receive the complete original namespace\n- Backward compatibility with frameworks like Wagtail\n\n## Files Modified\n- `/testbed/django/db/models/base.py`: Modified `ModelBase.__new__` method\n\n## Testing\nAll existing Django tests pass:\n- model_meta: 24 tests OK\n- model_inheritance: 46 tests OK  \n- migrations.test_operations: 94 tests OK\n- basic: 53 tests OK\n- model_fields: 261 tests OK\n\nCustom tests verify:\n- Basic custom metaclass with non-field attributes \u2713\n- Abstract models with custom metaclass \u2713\n- Wagtail-like pattern with multiple attributes \u2713\n- Method definitions still accessible \u2713\n- Mix of fields and non-field attributes \u2713\nEOF\ncat /testbed/CHANGES_SUMMARY.md\n```",
-    "reward": 0.0
+    "reward": 0.07776
   },
   {
     "role": "user",
@@ -463,7 +463,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me fix the summary file creation:\n\n```bash\ncat > /testbed/CHANGES_SUMMARY.md << 'ENDOFFILE'\n# Summary of Changes to Fix Custom Model Metaclass Issue\n\n## Problem\nIn Django 2.2.x (after commit a68ea231012434b522ce45c513d84add516afa60), custom metaclasses \nthat subclass ModelBase could no longer access non-field attributes in their __init__ method.\nThis broke frameworks like Wagtail that rely on this pattern.\n\n## Root Cause\nIn ModelBase.__new__, non-field attributes were being popped from the attrs dict in-place.\nSince Python's metaclass protocol passes the same attrs dict to __init__ after __new__ \nreturns, the custom metaclass's __init__ received a modified dict missing these attributes.\n\n## Solution\nThe fix preserves the original attrs dict for the metaclass __init__ by:\n\n1. Saving a copy of attrs at the start of __new__: orig_attrs = attrs.copy()\n2. Restoring attrs before both return statements: attrs.update(orig_attrs)\n\nThis ensures:\n- Django's internal class creation logic works unchanged (using the modified attrs)\n- Custom metaclass __init__ methods receive the complete original namespace\n- Backward compatibility with frameworks like Wagtail\n\n## Files Modified\n- /testbed/django/db/models/base.py: Modified ModelBase.__new__ method\n\n## Testing\nAll existing Django tests pass:\n- model_meta: 24 tests OK\n- model_inheritance: 46 tests OK  \n- migrations.test_operations: 94 tests OK\n- basic: 53 tests OK\n- model_fields: 261 tests OK\n\nCustom tests verify:\n- Basic custom metaclass with non-field attributes\n- Abstract models with custom metaclass\n- Wagtail-like pattern with multiple attributes\n- Method definitions still accessible\n- Mix of fields and non-field attributes\nENDOFFILE\ncat /testbed/CHANGES_SUMMARY.md\n```",
-    "reward": 0.0
+    "reward": 0.1296
   },
   {
     "role": "user",
@@ -477,7 +477,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now let me view the final state of the modified code to ensure everything is correct:\n\n```bash\nsed -n '68,90p' /testbed/django/db/models/base.py && echo \"...\" && sed -n '310,320p' /testbed/django/db/models/base.py\n```",
-    "reward": 0.0
+    "reward": 0.216
   },
   {
     "role": "user",
@@ -491,7 +491,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me also check the second return statement:\n\n```bash\nsed -n '318,323p' /testbed/django/db/models/base.py\n```",
-    "reward": 0.0
+    "reward": 0.36
   },
   {
     "role": "user",
@@ -508,7 +508,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The implementation is complete and correct. Let me do one final comprehensive test to ensure everything works:\n\n```bash\ncd /testbed && python test_metaclass_issue.py && echo \"---\" && python test_final_validation.py 2>&1 | head -30\n```",
-    "reward": 0.0
+    "reward": 0.6
   },
   {
     "role": "user",
@@ -525,7 +525,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Everything works perfectly. Now let me submit the final changes. The fix is complete, well-tested, and addresses the issue described in the PR. Let me prepare the final submission:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 1.0
   },
   {
     "role": "user",
