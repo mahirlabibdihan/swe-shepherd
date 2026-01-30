@@ -1,4 +1,4 @@
-from .train.trainer import PRM, PRMDataset
+from train.trainer import PRM, PRMDataset
 from transformers import AutoTokenizer
 import torch
 
