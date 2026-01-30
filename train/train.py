@@ -20,16 +20,11 @@ import json
 import glob
 from tqdm import tqdm
 
-dataset = []
+
 
 # read from dataset/prm_train.jsonl
 
-with open("dataset/prm_train.jsonl", "r") as f:
-    for line in f:
-        obj = json.loads(line)
-        dataset.append(obj)
-        
-print(dataset[0].keys())
+
 
 
 class PRMDataset(Dataset):
@@ -143,66 +138,50 @@ class PRM(nn.Module):
         h = out.hidden_states[-1][:, -1].float()
         return self.value_head(h).squeeze(-1)
 
-MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+def main():
+    
+    dataset = []
+    with open("dataset/prm_train.jsonl", "r") as f:
+        for line in f:
+            obj = json.loads(line)
+            dataset.append(obj)
+            
+    print(dataset[0].keys())
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL)
-tokenizer.pad_token = tokenizer.eos_token
-prm_ds = PRMDataset(dataset, tokenizer)
-from torch.utils.data import random_split
+    MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
-dataset_size = len(prm_ds)
-val_size = int(0.1 * dataset_size)  # 10% for validation
-train_size = dataset_size - val_size
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    tokenizer.pad_token = tokenizer.eos_token
+    prm_ds = PRMDataset(dataset, tokenizer)
+    from torch.utils.data import random_split
 
-train_ds, val_ds = random_split(prm_ds, [train_size, val_size])
-train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, collate_fn=collate)
-val_loader = DataLoader(val_ds, batch_size=2, shuffle=False, collate_fn=collate)
+    dataset_size = len(prm_ds)
+    val_size = int(0.1 * dataset_size)  # 10% for validation
+    train_size = dataset_size - val_size
+
+    train_ds, val_ds = random_split(prm_ds, [train_size, val_size])
+    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, collate_fn=collate)
+    val_loader = DataLoader(val_ds, batch_size=2, shuffle=False, collate_fn=collate)
 
 
-model = PRM(MODEL).cuda()
-optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
-criterion = nn.MSELoss()
+    model = PRM(MODEL).cuda()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+    criterion = nn.MSELoss()
 
-from tqdm import tqdm
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
+    from tqdm import tqdm
+    import torch.nn.functional as F
+    import matplotlib.pyplot as plt
 
-num_epochs = 3
-train_losses, val_losses = [], []
+    num_epochs = 3
+    train_losses, val_losses = [], []
 
-for epoch in range(num_epochs):
-    # -------- TRAIN --------
-    model.train()
-    running_train_loss = 0.0
+    for epoch in range(num_epochs):
+        # -------- TRAIN --------
+        model.train()
+        running_train_loss = 0.0
 
-    train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]", leave=False)
-    for step, batch in enumerate(train_loader_tqdm):
-        ids = batch["input_ids"].cuda()
-        mask = batch["attention_mask"].cuda()
-        labels = batch["labels"].cuda()
-
-        logits = model(ids, mask)
-        loss = criterion(logits, labels)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        running_train_loss += loss.item()
-        avg_loss_so_far = running_train_loss / (step + 1)
-
-        train_loader_tqdm.set_postfix({"loss": f"{avg_loss_so_far:.4f}"})
-
-    avg_train_loss = running_train_loss / len(train_loader)
-    train_losses.append(avg_train_loss)
-
-    # -------- VALIDATION --------
-    model.eval()
-    running_val_loss = 0.0
-
-    val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]", leave=False)
-    with torch.no_grad():
-        for step, batch in enumerate(val_loader_tqdm):
+        train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]", leave=False)
+        for step, batch in enumerate(train_loader_tqdm):
             ids = batch["input_ids"].cuda()
             mask = batch["attention_mask"].cuda()
             labels = batch["labels"].cuda()
@@ -210,11 +189,40 @@ for epoch in range(num_epochs):
             logits = model(ids, mask)
             loss = criterion(logits, labels)
 
-            running_val_loss += loss.item()
-            avg_val_so_far = running_val_loss / (step + 1)
-            val_loader_tqdm.set_postfix({"val_loss": f"{avg_val_so_far:.4f}"})
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-    avg_val_loss = running_val_loss / len(val_loader)
-    val_losses.append(avg_val_loss)
+            running_train_loss += loss.item()
+            avg_loss_so_far = running_train_loss / (step + 1)
 
-    print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+            train_loader_tqdm.set_postfix({"loss": f"{avg_loss_so_far:.4f}"})
+
+        avg_train_loss = running_train_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+
+        # -------- VALIDATION --------
+        model.eval()
+        running_val_loss = 0.0
+
+        val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]", leave=False)
+        with torch.no_grad():
+            for step, batch in enumerate(val_loader_tqdm):
+                ids = batch["input_ids"].cuda()
+                mask = batch["attention_mask"].cuda()
+                labels = batch["labels"].cuda()
+
+                logits = model(ids, mask)
+                loss = criterion(logits, labels)
+
+                running_val_loss += loss.item()
+                avg_val_so_far = running_val_loss / (step + 1)
+                val_loader_tqdm.set_postfix({"val_loss": f"{avg_val_so_far:.4f}"})
+
+        avg_val_loss = running_val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+
+        print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        
+if __name__ == "__main__":
+    main()
