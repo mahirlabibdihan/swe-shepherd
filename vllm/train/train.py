@@ -48,7 +48,8 @@ class PRMDataset(Dataset):
             
             self.samples.append((text, label))
 
-    def format(self, task, history, action, offset):
+    @classmethod
+    def format(cls, task, history, action, offset):
         parts = []
         parts.append(f"[Problem Statement]\n{task}")
         # Truncation notice

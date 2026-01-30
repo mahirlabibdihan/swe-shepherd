@@ -9,6 +9,8 @@ from jinja2 import StrictUndefined, Template
 
 from minisweagent import Environment, Model
 from minisweagent.models.openhf_model import OpenHFContextLengthExceededError
+import requests
+import os
 
 @dataclass
 class AgentConfig:
@@ -36,6 +38,7 @@ class AgentConfig:
     action_regex: str = r"```bash\s*\n(.*?)\n```"
     step_limit: int = 0
     cost_limit: float = 3.0
+    n_actions: int = 3
 
 
 class NonTerminatingException(Exception):
@@ -96,7 +99,26 @@ class DefaultAgent:
 
     def step(self) -> dict:
         """Query the LM, execute the action, return the observation."""
-        return self.get_observation(self.query())
+        if self.config.n_actions == 1:
+            return self.get_observation(self.query())
+        else:
+            best_response = None
+            max_score = float('-inf')
+            for _ in range(self.config.n_actions):
+                response = self.query()
+                output = requests.post(os.environ["REWARD_MODEL_SERVER"] + "/v1/score", json={
+                    "task": self.extra_template_vars["task"],
+                    "history": self.messages[2:],  # exclude system and instance messages
+                    "action": response["content"]
+                })
+                score = output.json().get("score", 0.0)
+                print(f"Action score #{_+1}: {score}")
+                if score > max_score:
+                    max_score = score
+                    best_response = response
+                
+            output = self.get_observation(best_response)
+            return output
 
     def query(self) -> dict:
         """Query the model and return the response."""
