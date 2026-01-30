@@ -107,7 +107,7 @@ class PRM(nn.Module):
             bnb_4bit_compute_dtype=torch.float16,
             llm_int8_enable_fp32_cpu_offload=True
         )
-
+        self.model_name = model_name
         base = AutoModelForCausalLM.from_pretrained(
             model_name,
             quantization_config=qconf,
