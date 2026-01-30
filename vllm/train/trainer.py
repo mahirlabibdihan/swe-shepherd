@@ -25,7 +25,7 @@ import os
 # read from dataset/prm_train.jsonl
 
 class PRMDataset(Dataset):
-    def __init__(self, hf_dataset, tokenizer, k=2, max_len=1024):
+    def __init__(self, hf_dataset, tokenizer, k=2, max_len=4096):
         self.samples = []
         self.tok = tokenizer
         self.max_len = max_len
@@ -226,7 +226,7 @@ def main():
     import torch.nn.functional as F
     import matplotlib.pyplot as plt
 
-    num_epochs = 1
+    num_epochs = 3
     train_losses, val_losses = [], []
 
     for epoch in range(num_epochs):
