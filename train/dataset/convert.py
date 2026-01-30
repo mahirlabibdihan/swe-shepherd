@@ -14,25 +14,6 @@ def serialize_history(history):
             text += f"<|assistant|>\n{content}\n"
     return text
 
-# def convert_to_axolotl_regression(steps):
-#     axolotl_data = []
-    
-#     for step in steps:
-#         history_text = ""
-#         for msg in step["messages"]:
-#             role = msg["role"].capitalize()
-#             content = msg["content"]
-#             history_text += f"{role}: {content}\n"
-            
-#         training_text = history_text + "Score:"
-            
-#         axolotl_data.append({
-#             "text": training_text,
-#             "reward": float(step["reward"])
-#         })
-             
-#     return axolotl_data   
-
 def convert_to_axolotl_regression(steps, k=5):
     axolotl_data = []
     
@@ -61,39 +42,30 @@ def convert_to_axolotl_regression(steps, k=5):
              
     return axolotl_data
 
+
+
 def extract_prm_steps(example):
     steps = []
     history = []
-    k = 5
-    for msg in example:
-        history.append({
-            "role": msg["role"],
-            "content": msg["content"]
-        })
+
+    old_step = {}
+    for msg in example["messages"][2:]:
         if msg["role"] == "assistant":
             steps.append({
-                "messages": history.copy(),
-                # "response": msg["content"],
+                "problem_statement": id_to_problem[example['instance_id']],
+                "history": history.copy(),
+                "action": msg["content"],
                 "reward": msg["reward"]
             })
-            
-    # Truncate long histories in each step
-    # for step in steps:
-    #     msgs = step["messages"]
-    #     if len(msgs) > (k + 2):
-    #         truncated_messages = msgs[0:2]
-    #         truncated_messages.append({
-    #             "role": "system",
-    #             "content": "[... Several conversational turns omitted for brevity ...]"
-    #         })
-    #         truncated_messages.extend(msgs[-k:])
-    #         step["messages"] = truncated_messages
-        
-    return convert_to_axolotl_regression(steps)
+            old_step['action'] = msg["content"]
+        elif msg["role"] == "user":
+            old_step['observation'] = msg["content"]
+            history.append(old_step)
+            old_step = {}
+
+    return steps
 
 import json
-
-
 
 prm_train = []
 
@@ -109,7 +81,11 @@ unverified_paths = glob.glob(
 for path in unverified_paths:
     with open(path, "r") as f:
         obj = json.load(f)
-        unverified_dataset.append(obj)
+        instance_id = os.path.splitext(os.path.basename(path))[0]
+        unverified_dataset.append({
+            'instance_id': instance_id,
+            'messages': obj
+        })
 
 verified_paths = glob.glob(
     "verified/*.json"
@@ -118,8 +94,15 @@ verified_paths = glob.glob(
 for path in verified_paths:
     with open(path, "r") as f:
         obj = json.load(f)
-        verified_dataset.append(obj)
+        instance_id = os.path.splitext(os.path.basename(path))[0]
+        verified_dataset.append({
+            'instance_id': instance_id,
+            'messages': obj
+        })
 
+from datasets import load_dataset
+benchmark = load_dataset("SWE-bench/SWE-bench", split="test")
+id_to_problem = {ex["instance_id"]: ex["problem_statement"] for ex in benchmark}
 
 for ex in unverified_dataset:
     steps = extract_prm_steps(ex)
@@ -160,6 +143,7 @@ def save_jsonl(dataset, path):
             f.write(json.dumps(item) + "\n")
      
 import argparse
+
 
 def main():
     parser = argparse.ArgumentParser(description="Save datasets as JSONL files.")

@@ -1,65 +1,210 @@
+import random
 import torch
+import json
+
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments
-from trl import SFTTrainer
-from peft import LoraConfig, TaskType
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
 
-# 1. Setup Model and Tokenizer
-model_id = "meta-llama/Llama-3.1-8B"  # Replace with your base model
-tokenizer = AutoTokenizer.from_pretrained(model_id)
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    BitsAndBytesConfig
+)
+
+from peft import LoraConfig, get_peft_model
+import torch.nn as nn
+import torch.nn.functional as F
+
+import json
+import glob
+from tqdm import tqdm
+
+dataset = []
+
+# read from dataset/prm_train.jsonl
+
+with open("dataset/prm_train.jsonl", "r") as f:
+    for line in f:
+        obj = json.loads(line)
+        dataset.append(obj)
+        
+print(dataset[0].keys())
+
+
+class PRMDataset(Dataset):
+    def __init__(self, hf_dataset, tokenizer, k=2, max_len=2048):
+        self.samples = []
+        self.tok = tokenizer
+        self.max_len = max_len
+
+        for ex in hf_dataset:
+            for step in ex:
+                hist = step["history"][-k:]
+                task = step["problem_statement"]
+                text = self.format(task, hist, step["action"], len(step["history"])-k)
+                label = step["reward"]
+                self.samples.append((text, label))
+
+    def format(self, task, history, action, offset):
+        parts = []
+        parts.append(f"[Problem Statement]\n{task}")
+        # Truncation notice
+        if offset > 0:
+            parts.append(
+                f"[History]\n"
+                f"(Earlier {offset} action-observation steps are omitted)\n"
+            )
+        else:
+            parts.append("[History]\n")
+        for i, msg in enumerate(history):
+            parts.append(f"[Action #{offset+i+1}]\n{msg['action']}")
+            parts.append(f"[Observation #{offset+i+1}]\n{msg['observation']}")
+        parts.append(f"[Current Action]\n{action}")
+        return "\n".join(parts)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        text, label = self.samples[idx]
+        enc = self.tok(
+            text,
+            truncation=True,
+            max_length=self.max_len,
+            return_tensors="pt"
+        )
+        return {
+            "input_ids": enc["input_ids"][0],
+            "attention_mask": enc["attention_mask"][0],
+            "label": label
+        }
+
+def collate(batch):
+    return {
+        "input_ids": pad_sequence(
+            [b["input_ids"] for b in batch],
+            batch_first=True,
+            padding_value=0
+        ),
+        "attention_mask": pad_sequence(
+            [b["attention_mask"] for b in batch],
+            batch_first=True,
+            padding_value=0
+        ),
+        "labels": torch.tensor([b["label"] for b in batch])
+    }
+
+class PRM(nn.Module):
+    def __init__(self, model_name):
+        super().__init__()
+
+        qconf = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+            llm_int8_enable_fp32_cpu_offload=True
+        )
+
+        base = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=qconf,
+            device_map="auto"
+        )
+
+        lora = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules=["q_proj", "v_proj"],
+            lora_dropout=0.05,
+            task_type="CAUSAL_LM"
+        )
+
+        self.llm = get_peft_model(base, lora)
+        self.value_head = nn.Linear(base.config.hidden_size, 1)
+
+    def forward(self, input_ids, attention_mask):
+        out = self.llm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True
+        )
+
+        h = out.hidden_states[-1][:, -1].float()
+        return self.value_head(h).squeeze(-1)
+
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
 tokenizer.pad_token = tokenizer.eos_token
+prm_ds = PRMDataset(dataset, tokenizer)
+from torch.utils.data import random_split
 
-# Load model with 1 output neuron for regression
-model = AutoModelForSequenceClassification.from_pretrained(
-    model_id, 
-    num_labels=1, 
-    torch_dtype=torch.bfloat16,
-    device_map="auto"
-)
-model.config.pad_token_id = tokenizer.pad_token_id
+dataset_size = len(prm_ds)
+val_size = int(0.1 * dataset_size)  # 10% for validation
+train_size = dataset_size - val_size
 
-# 2. Load and Prepare Dataset
-# Format: {"prompt": "User query", "reward": 0.85}
-dataset = load_dataset("json", data_files="dataset/prm_train.jsonl", split="train")
+train_ds, val_ds = random_split(prm_ds, [train_size, val_size])
+train_loader = DataLoader(train_ds, batch_size=1, shuffle=True, collate_fn=collate)
+val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate)
 
-def formatting_func(example):
-    # This combines your prompt into a string the model evaluates
-    return f"Instruction: {example['prompt']}\nScore:"
 
-# 3. Configure LoRA for Classification
-peft_config = LoraConfig(
-    task_type=TaskType.SEQ_CLS,
-    r=8,
-    lora_alpha=16,
-    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-    lora_dropout=0.05,
-)
+model = PRM(MODEL).cuda()
+optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+criterion = nn.MSELoss()
 
-# 4. Training Arguments
-training_args = TrainingArguments(
-    output_dir="./pointwise_reward_model",
-    per_device_train_batch_size=8,
-    gradient_accumulation_steps=2,
-    learning_rate=2e-5,
-    num_train_epochs=1,
-    logging_steps=1,
-    bf16=True,
-    remove_unused_columns=False # Important to keep the 'reward' column for labels
-)
+from tqdm import tqdm
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
-# 5. Initialize SFTTrainer
-trainer = SFTTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=dataset,
-    peft_config=peft_config,
-    max_seq_length=512,
-    formatting_func=formatting_func,
-    data_collator=None, # TRL will handle the label mapping
-)
+num_epochs = 3
+train_losses, val_losses = [], []
 
-# Manually ensure the labels are passed correctly
-# TRL SFTTrainer expects a column named 'labels' for regression
-dataset = dataset.map(lambda x: {"labels": float(x["reward"])})
+for epoch in range(num_epochs):
+    # -------- TRAIN --------
+    model.train()
+    running_train_loss = 0.0
 
-trainer.train()
+    train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]", leave=False)
+    for step, batch in enumerate(train_loader_tqdm):
+        ids = batch["input_ids"].cuda()
+        mask = batch["attention_mask"].cuda()
+        labels = batch["labels"].cuda()
+
+        logits = model(ids, mask)
+        loss = criterion(logits, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        running_train_loss += loss.item()
+        avg_loss_so_far = running_train_loss / (step + 1)
+
+        train_loader_tqdm.set_postfix({"loss": f"{avg_loss_so_far:.4f}"})
+
+    avg_train_loss = running_train_loss / len(train_loader)
+    train_losses.append(avg_train_loss)
+
+    # -------- VALIDATION --------
+    model.eval()
+    running_val_loss = 0.0
+
+    val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]", leave=False)
+    with torch.no_grad():
+        for step, batch in enumerate(val_loader_tqdm):
+            ids = batch["input_ids"].cuda()
+            mask = batch["attention_mask"].cuda()
+            labels = batch["labels"].cuda()
+
+            logits = model(ids, mask)
+            loss = criterion(logits, labels)
+
+            running_val_loss += loss.item()
+            avg_val_so_far = running_val_loss / (step + 1)
+            val_loader_tqdm.set_postfix({"val_loss": f"{avg_val_so_far:.4f}"})
+
+    avg_val_loss = running_val_loss / len(val_loader)
+    val_losses.append(avg_val_loss)
+
+    print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
