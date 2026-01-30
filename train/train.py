@@ -33,7 +33,7 @@ print(dataset[0].keys())
 
 
 class PRMDataset(Dataset):
-    def __init__(self, hf_dataset, tokenizer, k=2, max_len=8192):
+    def __init__(self, hf_dataset, tokenizer, k=2, max_len=4096):
         self.samples = []
         self.tok = tokenizer
         self.max_len = max_len
