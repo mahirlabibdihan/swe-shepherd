@@ -33,12 +33,21 @@ print(dataset[0].keys())
 
 
 class PRMDataset(Dataset):
-    def __init__(self, hf_dataset, tokenizer, k=2, max_len=2048):
+    def __init__(self, hf_dataset, tokenizer, k=2, max_len=8192):
         self.samples = []
         self.tok = tokenizer
         self.max_len = max_len
 
         for step in hf_dataset:
+            n_tokens = len(
+                tokenizer(
+                    text,
+                    truncation=False,
+                    add_special_tokens=True
+                )["input_ids"]
+            )
+            if n_tokens > max_len:
+                continue  # drop sample
             hist = step["history"][-k:]
             task = step["problem_statement"]
             text = self.format(task, hist, step["action"], len(step["history"])-k)
