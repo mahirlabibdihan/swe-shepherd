@@ -108,7 +108,7 @@ class DefaultAgent:
                 response = self.query()
                 output = requests.post(os.environ["REWARD_MODEL_SERVER"] + "/v1/score", json={
                     "task": self.extra_template_vars["task"],
-                    "history": self.messages[2:],  # exclude system and instance messages
+                    "history": [{"role": msg["role"], "content": msg["content"]} for msg in self.messages[2:]],  # exclude system and instance messages
                     "action": response["content"]
                 })
                 score = output.json().get("score", 0.0)
