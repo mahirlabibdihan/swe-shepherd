@@ -142,15 +142,17 @@ class DefaultAgent:
         
         while True:
             try:
-                response = self.model.query(msgs[:1] + ([truncation_notice] if len(msgs)-2 > self.n_history else []) + msgs[-self.n_history+2:])  # always keep system and instance messages
+                core = msgs[:2]
+                history = msgs[2:]
+                response = self.model.query(
+                    core # always include system and instance messages
+                    + ([truncation_notice] if len(history) > self.n_history else []) # add truncation notice if needed
+                    + history[-self.n_history:] # include only last n_history messages
+                )
                 break
             except OpenHFContextLengthExceededError as e:
-                # Remove oldest non-system message and retry
-                for i, msg in enumerate(msgs[2:]):
-                    if msg["role"] != "system":
-                        self.n_history -= 1
-                        break
-        
+                self.n_history -= 1
+
         # save msg to json file
         with open("last_agent_messages.json", "w", encoding="utf-8") as f:
             import json
