@@ -24,8 +24,8 @@ test_prm_ds = PRMDataset(test_dataset, tokenizer)
 test_loader = DataLoader(test_prm_ds, batch_size=2, shuffle=False, collate_fn=collate)
 
 # Load model from checkpoint
-model = PRM(MODEL).cuda()
-model.load_state_dict(torch.load("prm_model.pth"))
+model = PRM.load("prm_ckpt")
+
 model.eval()
 test_losses = []
 with torch.no_grad():

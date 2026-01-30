@@ -12,14 +12,14 @@ from transformers import (
     BitsAndBytesConfig
 )
 
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, PeftModel
 import torch.nn as nn
 import torch.nn.functional as F
 
 import json
 import glob
 from tqdm import tqdm
-
+import os
 
 
 # read from dataset/prm_train.jsonl
@@ -135,6 +135,47 @@ class PRM(nn.Module):
         h = out.hidden_states[-1][:, -1].float()
         return self.value_head(h).squeeze(-1)
 
+    def save(self, save_dir: str):
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Save LoRA adapters
+        self.llm.save_pretrained(save_dir)
+
+        # Save value head
+        torch.save(
+            self.value_head.state_dict(),
+            os.path.join(save_dir, "value_head.pt")
+        )
+
+        # Save metadata (optional but nice)
+        meta = {
+            "model_name": self.model_name
+        }
+        torch.save(meta, os.path.join(save_dir, "meta.pt"))
+        
+    @classmethod
+    def load(cls, load_dir: str, device_map="auto"):
+        meta = torch.load(os.path.join(load_dir, "meta.pt"))
+        model_name = meta["model_name"]
+
+        # Recreate model
+        model = cls(model_name)
+
+        # Load LoRA adapters
+        model.llm = PeftModel.from_pretrained(
+            model.llm.base_model,
+            load_dir,
+            device_map=device_map
+        )
+
+        # Load value head
+        model.value_head.load_state_dict(
+            torch.load(
+                os.path.join(load_dir, "value_head.pt"),
+                map_location="cpu"
+            )
+        )
+
 def main():
     
     dataset = []
@@ -222,7 +263,7 @@ def main():
         print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
     
     # Save the model
-    torch.save(model.state_dict(), "prm_model.pth")
+    model.save("prm_ckpt")
         
 if __name__ == "__main__":
     main()
