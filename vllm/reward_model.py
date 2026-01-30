@@ -19,11 +19,11 @@ class RewardModel:
                 old_step['action'] = msg["content"]
             elif msg["role"] == "user":
                 old_step['observation'] = msg["content"]
-                history.append(old_step)
+                act_obs.append(old_step)
                 old_step = {}
             
             
-        text = PRMDataset.format(task, history, action, len(history) - 2)
+        text = PRMDataset.format(task, act_obs, action, len(act_obs) - 2)
         inputs = self.tokenizer(
             text,
             return_tensors="pt",
