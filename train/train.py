@@ -144,8 +144,8 @@ val_size = int(0.1 * dataset_size)  # 10% for validation
 train_size = dataset_size - val_size
 
 train_ds, val_ds = random_split(prm_ds, [train_size, val_size])
-train_loader = DataLoader(train_ds, batch_size=5, shuffle=True, collate_fn=collate)
-val_loader = DataLoader(val_ds, batch_size=5, shuffle=False, collate_fn=collate)
+train_loader = DataLoader(train_ds, batch_size=3, shuffle=True, collate_fn=collate)
+val_loader = DataLoader(val_ds, batch_size=3, shuffle=False, collate_fn=collate)
 
 
 model = PRM(MODEL).cuda()
