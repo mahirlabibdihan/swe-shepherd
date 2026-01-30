@@ -24,9 +24,6 @@ from tqdm import tqdm
 
 # read from dataset/prm_train.jsonl
 
-
-
-
 class PRMDataset(Dataset):
     def __init__(self, hf_dataset, tokenizer, k=2, max_len=4096):
         self.samples = []
@@ -223,6 +220,9 @@ def main():
         val_losses.append(avg_val_loss)
 
         print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+    
+    # Save the model
+    torch.save(model.state_dict(), "prm_model.pth")
         
 if __name__ == "__main__":
     main()

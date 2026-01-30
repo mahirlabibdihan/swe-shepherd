@@ -1,4 +1,4 @@
-from train import PRMDataset, collate, model, criterion
+from train import PRMDataset, collate, PRM, criterion
 from torch.utils.data import DataLoader
 import json
 from transformers import (
@@ -22,6 +22,9 @@ tokenizer.pad_token = tokenizer.eos_token
 test_prm_ds = PRMDataset(test_dataset, tokenizer)
 test_loader = DataLoader(test_prm_ds, batch_size=2, shuffle=False, collate_fn=collate)
 
+# Load model from checkpoint
+model = PRM(MODEL).cuda()
+model.load_state_dict(torch.load("prm_model.pth"))
 model.eval()
 test_losses = []
 with torch.no_grad():
