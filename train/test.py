@@ -1,4 +1,4 @@
-from train import PRMDataset, collate, PRM, criterion
+from train import PRMDataset, collate, PRM
 from torch.utils.data import DataLoader
 import json
 from transformers import (
@@ -8,7 +8,8 @@ from transformers import (
 )
 import torch
 from tqdm import tqdm
-
+import torch.nn as nn
+criterion = nn.MSELoss()
 test_dataset = []
 with open("dataset/prm_test.jsonl", "r") as f:
     for line in f:
