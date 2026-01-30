@@ -98,7 +98,7 @@ def collate(batch):
     }
 
 class PRM(nn.Module):
-    def __init__(self, model_name):
+    def __init__(self, model_name, load_lora=True):
         super().__init__()
 
         qconf = BitsAndBytesConfig(
@@ -121,8 +121,19 @@ class PRM(nn.Module):
             lora_dropout=0.05,
             task_type="CAUSAL_LM"
         )
+        
+        if load_lora:
+            lora = LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules=["q_proj", "v_proj"],
+                lora_dropout=0.05,
+                task_type="CAUSAL_LM"
+            )
+            self.llm = get_peft_model(base, lora)
+        else:
+            self.llm = base
 
-        self.llm = get_peft_model(base, lora)
         self.value_head = nn.Linear(base.config.hidden_size, 1)
 
     def forward(self, input_ids, attention_mask):
@@ -158,23 +169,24 @@ class PRM(nn.Module):
         meta = torch.load(os.path.join(load_dir, "meta.pt"))
         model_name = meta["model_name"]
 
-        # Recreate model
-        model = cls(model_name)
+        # IMPORTANT: do NOT attach LoRA here
+        model = cls(model_name, load_lora=False)
 
-        # Load LoRA adapters
+        # Load LoRA adapters exactly once
         model.llm = PeftModel.from_pretrained(
-            model.llm.base_model,
+            model.llm,
             load_dir,
             device_map=device_map
         )
 
-        # Load value head
         model.value_head.load_state_dict(
             torch.load(
                 os.path.join(load_dir, "value_head.pt"),
                 map_location="cpu"
             )
         )
+
+        return model
 
 def main():
     
