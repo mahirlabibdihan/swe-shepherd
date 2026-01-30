@@ -147,7 +147,7 @@ class DefaultAgent:
                 response = self.model.query(
                     core # always include system and instance messages
                     + ([truncation_notice] if len(history) > self.n_history else []) # add truncation notice if needed
-                    + history[-self.n_history:] if self.n_history > 0 else [] # include only last n_history messages
+                    + (history[-self.n_history:] if self.n_history > 0 else []) # include only last n_history messages
                 )
                 break
             except OpenHFContextLengthExceededError as e:
