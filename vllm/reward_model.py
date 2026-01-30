@@ -12,6 +12,17 @@ class RewardModel:
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def process(self, task, history, action):
+        act_obs = []
+        old_step = {}
+        for msg in history:
+            if msg["role"] == "assistant":
+                old_step['action'] = msg["content"]
+            elif msg["role"] == "user":
+                old_step['observation'] = msg["content"]
+                history.append(old_step)
+                old_step = {}
+            
+            
         text = PRMDataset.format(task, history, action, len(history) - 2)
         inputs = self.tokenizer(
             text,
