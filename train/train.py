@@ -25,7 +25,7 @@ from tqdm import tqdm
 # read from dataset/prm_train.jsonl
 
 class PRMDataset(Dataset):
-    def __init__(self, hf_dataset, tokenizer, k=2, max_len=2048):
+    def __init__(self, hf_dataset, tokenizer, k=2, max_len=1024):
         self.samples = []
         self.tok = tokenizer
         self.max_len = max_len
