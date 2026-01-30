@@ -169,7 +169,7 @@ def main():
     import torch.nn.functional as F
     import matplotlib.pyplot as plt
 
-    num_epochs = 3
+    num_epochs = 1
     train_losses, val_losses = [], []
 
     for epoch in range(num_epochs):
