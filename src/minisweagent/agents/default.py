@@ -72,6 +72,7 @@ class DefaultAgent:
         self.model = model
         self.env = env
         self.extra_template_vars = {}
+        self.n_history = 0
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -88,6 +89,7 @@ class DefaultAgent:
         self.messages = []
         self.add_message("system", self.render_template(self.config.system_template))
         self.add_message("user", self.render_template(self.config.instance_template))
+        self.n_history = 0
         while True:
             try:
                 self.step()
@@ -96,6 +98,7 @@ class DefaultAgent:
             except TerminatingException as e:
                 self.add_message("user", str(e))
                 return type(e).__name__, str(e)
+            self.n_history += 2
 
     def step(self) -> dict:
         """Query the LM, execute the action, return the observation."""
@@ -137,19 +140,15 @@ class DefaultAgent:
             )
         }
         
-        flag = False
         while True:
             try:
-                response = self.model.query(msgs)
+                response = self.model.query(msgs[:1] + ([truncation_notice] if len(msgs)-2 > self.n_history else []) + msgs[-self.n_history+2:])  # always keep system and instance messages
                 break
             except OpenHFContextLengthExceededError as e:
                 # Remove oldest non-system message and retry
                 for i, msg in enumerate(msgs[2:]):
                     if msg["role"] != "system":
-                        del msgs[i + 2]
-                        if not flag:
-                            msgs.insert(2, truncation_notice)
-                            flag = True
+                        self.n_history -= 1
                         break
         
         # save msg to json file
