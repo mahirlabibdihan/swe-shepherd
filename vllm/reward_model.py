@@ -19,6 +19,8 @@ class RewardModel:
                 old_step['action'] = msg["content"]
             elif msg["role"] == "user":
                 old_step['observation'] = msg["content"]
+                if 'action' not in old_step:
+                    raise ValueError(f"History format error: user message without preceding assistant action.\n{history}")
                 act_obs.append(old_step)
                 old_step = {}
             

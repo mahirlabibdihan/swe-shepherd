@@ -73,6 +73,7 @@ class DefaultAgent:
         self.env = env
         self.extra_template_vars = {}
         self.n_history = 0
+        self.n_steps = 0
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -128,7 +129,7 @@ class DefaultAgent:
 
     def query(self) -> dict:
         """Query the model and return the response."""
-        if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
+        if 0 < self.config.step_limit <= self.model.n_steps or 0 < self.config.cost_limit <= self.model.cost:
             raise LimitsExceeded()
         
         msgs = self.messages
@@ -167,6 +168,7 @@ class DefaultAgent:
         output = self.execute_action(self.parse_action(response))
         observation = self.render_template(self.config.action_observation_template, output=output)
         self.add_message("user", observation)
+        self.n_steps += 1
         return output
 
     def parse_action(self, response: dict) -> dict:
