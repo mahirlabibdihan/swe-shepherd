@@ -129,7 +129,7 @@ class DefaultAgent:
 
     def query(self) -> dict:
         """Query the model and return the response."""
-        if 0 < self.config.step_limit <= self.model.n_steps or 0 < self.config.cost_limit <= self.model.cost:
+        if 0 < self.config.step_limit <= self.n_steps or 0 < self.config.cost_limit <= self.model.cost:
             raise LimitsExceeded()
         
         msgs = self.messages
