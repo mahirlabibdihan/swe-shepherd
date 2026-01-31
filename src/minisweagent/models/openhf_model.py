@@ -59,7 +59,7 @@ class OpenHFModel(OpenRouterModel):
         }
 
         try:
-            response = requests.post(self._api_url, headers=headers, data=json.dumps(payload), timeout=100)
+            response = requests.post(self._api_url, headers=headers, data=json.dumps(payload), timeout=150)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
