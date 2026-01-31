@@ -298,8 +298,8 @@ def main():
         
         
         plt.figure(figsize=(8,5))
-        plt.plot(range(1, num_epochs+1), train_losses, label='Train Loss', marker='o')
-        plt.plot(range(1, num_epochs+1), val_losses, label='Val Loss', marker='o')
+        plt.plot(range(1, epoch+2), train_losses, label='Train Loss', marker='o')
+        plt.plot(range(1, epoch+2), val_losses, label='Val Loss', marker='o')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.title('Training and Validation Loss')
