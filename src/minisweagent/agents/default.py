@@ -156,9 +156,9 @@ class DefaultAgent:
                     raise RuntimeError("Model context length too small to fit system and instance messages.")
 
         # save msg to json file
-        with open("last_agent_messages.json", "w", encoding="utf-8") as f:
-            import json
-            json.dump(msgs + [response], f, indent=2)
+        # with open("last_agent_messages.json", "w", encoding="utf-8") as f:
+        #     import json
+        #     json.dump(msgs + [response], f, indent=2)
             
         return response
 
