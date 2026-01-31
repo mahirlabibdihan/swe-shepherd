@@ -112,7 +112,7 @@ class PRM(nn.Module):
         base = AutoModelForCausalLM.from_pretrained(
             model_name,
             quantization_config=qconf,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             device_map="auto"
         )
         
