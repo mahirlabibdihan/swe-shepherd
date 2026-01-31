@@ -95,7 +95,7 @@ class DefaultAgent:
         self.add_message("user", self.render_template(self.config.instance_template))
         self.n_history = 0
         self.n_steps = 0
-        self.tree = []
+        self.tree = [self.messages[1]]
         while True:
             try:
                 self.step()
@@ -125,15 +125,13 @@ class DefaultAgent:
                     "action": response["content"]
                 })
                 score = output.json().get("score", 0.0)
-                candidates.append((response, score))
+                candidates.append({"content": response["content"], "score": score, "timestamp": time.time()})
                 # print(f"Action score #{_+1}: {score}")
                 if score > max_score:
                     max_score = score
                     best_response = response
             
-            for resp, score in candidates:
-                self.tree.append({"role": "assistant", "content": resp["content"], "reward": score, "timestamp": time.time()})
-                
+            self.tree.append({"role": "assistant", "content": best_response["content"], "timestamp": time.time(), "candidates": candidates})
             self.add_message("assistant", **best_response)
             output = self.get_observation(best_response)
             return output
