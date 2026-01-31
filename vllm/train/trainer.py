@@ -106,15 +106,16 @@ class PRM(nn.Module):
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16,
-            llm_int8_enable_fp32_cpu_offload=True
+            # llm_int8_enable_fp32_cpu_offload=True
         )
         self.model_name = model_name
         base = AutoModelForCausalLM.from_pretrained(
             model_name,
             quantization_config=qconf,
+            torch_dtype=torch.float16,
             device_map="auto"
         )
-
+        
         lora = LoraConfig(
             r=8,
             lora_alpha=16,
@@ -131,6 +132,7 @@ class PRM(nn.Module):
                 lora_dropout=0.05,
                 task_type="CAUSAL_LM"
             )
+            base.config.use_cache = False 
             self.llm = get_peft_model(base, lora)
         else:
             self.llm = base
