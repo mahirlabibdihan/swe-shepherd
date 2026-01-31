@@ -234,7 +234,7 @@ def main():
         factor=0.3,
         patience=1,
         min_lr=1e-6,
-        verbose=True
+        # verbose=True
     )
 
     from tqdm import tqdm
