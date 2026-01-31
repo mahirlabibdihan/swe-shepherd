@@ -1,4 +1,4 @@
-from vllm.train.trainer import PRMDataset, collate, PRM
+from train.trainer import PRMDataset, collate, PRM
 from torch.utils.data import DataLoader
 import json
 from transformers import (
