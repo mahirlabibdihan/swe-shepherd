@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by understanding the structure of the repository and locating the relevant file mentioned in the PR description - `django/utils/dateparse.py`.\n\n```bash\nfind /testbed -name \"dateparse.py\" -type f | head -20\n```",
-    "reward": 0.09146627134790696
+    "reward": 0.37472481312451933
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the file. Now let me examine the `parse_duration()` function to understand the current implementation and the bug described in the PR.\n\n```bash\ncat /testbed/django/utils/dateparse.py\n```",
-    "reward": 0.15244378557984492
+    "reward": 0.45787468854086555
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I can see the issue. The problem is on line 147 (the last line of `parse_duration`). When parsing an ISO 8601 duration like `-P1D`, the sign is extracted but only applied to the time components (hours, minutes, seconds, microseconds) via `sign * datetime.timedelta(**kw)`. The days are added separately without considering the sign.\n\nAccording to the previous attempt analysis, the fix needs to:\n1. Detect which regex matched (ISO 8601 vs standard/PostgreSQL)\n2. For ISO 8601: apply sign to the entire duration (days + time)\n3. For standard/PostgreSQL: keep the current behavior where days carry their own sign and the separate sign applies only to time\n\nLet me first create a reproduction script to verify the bug:\n\n```bash\ncat <<'EOF' > /testbed/reproduce_bug.py\n#!/usr/bin/env python\n\"\"\"Reproduce the parse_duration bug with negative ISO 8601 durations.\"\"\"\n\nimport sys\nimport os\nsys.path.insert(0, '/testbed')\n\nfrom datetime import timedelta\nfrom django.utils.dateparse import parse_duration\nfrom django.utils.duration import duration_iso_string\n\nprint(\"Testing parse_duration bug with negative ISO 8601 durations\")\nprint(\"=\" * 70)\n\n# Test case 1: negative days only\ntd1 = timedelta(days=-1)\niso_str1 = duration_iso_string(td1)\nparsed1 = parse_duration(iso_str1)\nprint(f\"\\nTest 1: Negative days only\")\nprint(f\"  Original timedelta: {td1}\")\nprint(f\"  ISO string: {iso_str1}\")\nprint(f\"  Parsed back: {parsed1}\")\nprint(f\"  Match: {td1 == parsed1} (Expected: True, Got: {td1 == parsed1})\")\n\n# Test case 2: negative days with microseconds\ntd2 = timedelta(days=-1, microseconds=1)\niso_str2 = duration_iso_string(td2)\nparsed2 = parse_duration(iso_str2)\nprint(f\"\\nTest 2: Negative days with microseconds\")\nprint(f\"  Original timedelta: {td2}\")\nprint(f\"  ISO string: {iso_str2}\")\nprint(f\"  Parsed back: {parsed2}\")\nprint(f\"  Match: {td2 == parsed2} (Expected: True, Got: {td2 == parsed2})\")\n\n# Test case 3: negative days with hours\ntd3 = timedelta(days=-5, hours=-3)\niso_str3 = duration_iso_string(td3)\nparsed3 = parse_duration(iso_str3)\nprint(f\"\\nTest 3: Negative days with hours\")\nprint(f\"  Original timedelta: {td3}\")\nprint(f\"  ISO string: {iso_str3}\")\nprint(f\"  Parsed back: {parsed3}\")\nprint(f\"  Match: {td3 == parsed3} (Expected: True, Got: {td3 == parsed3})\")\n\n# Test case 4: Direct ISO 8601 string parsing\nprint(f\"\\nTest 4: Direct ISO 8601 string parsing\")\ntest_cases = [\n    ('-P1D', timedelta(days=-1)),\n    ('-P5D', timedelta(days=-5)),\n    ('P1D', timedelta(days=1)),\n    ('-P1DT2H', timedelta(days=-1, hours=-2)),\n]\nfor iso_str, expected in test_cases:\n    parsed = parse_duration(iso_str)\n    match = parsed == expected\n    print(f\"  '{iso_str}' -> {parsed} (Expected: {expected}, Match: {match})\")\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"Summary: Bug exists if any test shows Match: False\")\nEOF\n```",
-    "reward": 0.004072975966408215
+    "reward": 0.2631244809014426
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script to confirm the bug:\n\n```bash\ncd /testbed && python reproduce_bug.py\n```",
-    "reward": 0.0067882932773470255
+    "reward": 0.27187413483573764
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The bug is confirmed. Now I need to implement the fix. Based on the previous attempt analysis, I need to:\n\n1. Detect which regex matched (specifically if it's ISO 8601)\n2. For ISO 8601: apply sign to the entire duration `sign * (days + datetime.timedelta(**kw))`\n3. For standard/PostgreSQL: keep current behavior `days + sign * datetime.timedelta(**kw)`\n\nLet me examine the current code more carefully to understand the regex matching:\n\n```bash\nnl -ba /testbed/django/utils/dateparse.py | sed -n '130,150p'\n```",
-    "reward": 0.011313822128911709
+    "reward": 0.2864568913928961
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I need to implement the fix. The key is to detect which regex matched and apply the sign accordingly. I'll modify the `parse_duration` function to:\n\n1. Check if the match came from `iso8601_duration_re`\n2. If ISO 8601: return `sign * (days + datetime.timedelta(**kw))`\n3. Otherwise: return `days + sign * datetime.timedelta(**kw)` (current behavior)\n\nLet me create the fix:\n\n```bash\ncat <<'EOF' > /tmp/fix_parse_duration.py\nimport sys\n\n# Read the file\nwith open('/testbed/django/utils/dateparse.py', 'r') as f:\n    lines = f.readlines()\n\n# Find the parse_duration function and modify it\nnew_lines = []\nin_parse_duration = False\nfor i, line in enumerate(lines):\n    if 'def parse_duration(value):' in line:\n        in_parse_duration = True\n    \n    # Replace the match assignment to capture which regex matched\n    if in_parse_duration and line.strip().startswith('match = ('):\n        # We need to replace the multi-line match statement\n        # Find where it ends\n        j = i\n        while j < len(lines) and ')' not in lines[j]:\n            j += 1\n        # Skip the original match lines\n        new_lines.append('    match = standard_duration_re.match(value)\\n')\n        new_lines.append('    if not match:\\n')\n        new_lines.append('        match = iso8601_duration_re.match(value)\\n')\n        new_lines.append('        is_iso8601 = True\\n')\n        new_lines.append('    else:\\n')\n        new_lines.append('        is_iso8601 = False\\n')\n        new_lines.append('    if not match:\\n')\n        new_lines.append('        match = postgres_interval_re.match(value)\\n')\n        # Skip to after the closing parenthesis\n        for k in range(i, j + 1):\n            pass  # Skip these lines\n        continue\n    elif i < len(lines) - 1 and any(x in lines[i] for x in ['standard_duration_re.match', 'iso8601_duration_re.match', 'postgres_interval_re.match']) and i > 0 and 'match = (' in lines[i-1]:\n        # Skip lines that are part of the old match statement\n        continue\n    \n    # Replace the return statement\n    if in_parse_duration and line.strip().startswith('return days + sign *'):\n        new_lines.append('        if is_iso8601:\\n')\n        new_lines.append('            # For ISO 8601, sign applies to entire duration\\n')\n        new_lines.append('            return sign * (days + datetime.timedelta(**kw))\\n')\n        new_lines.append('        else:\\n')\n        new_lines.append('            # For standard/PostgreSQL, days have their own sign\\n')\n        new_lines.append('            return days + sign * datetime.timedelta(**kw)\\n')\n        in_parse_duration = False\n        continue\n    \n    new_lines.append(line)\n\n# Write the modified file\nwith open('/testbed/django/utils/dateparse.py', 'w') as f:\n    f.writelines(new_lines)\n\nprint(\"File modified successfully\")\nEOF\npython /tmp/fix_parse_duration.py\n```",
-    "reward": 0.018856370214852848
+    "reward": 0.3107614856548268
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me verify the changes were applied correctly:\n\n```bash\nnl -ba /testbed/django/utils/dateparse.py | sed -n '125,160p'\n```",
-    "reward": 0.031427283691421413
+    "reward": 0.35126914275804466
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see there's an issue with my script - it left some remnants of the old code (lines 141-143). Let me fix this properly by rewriting the function more carefully:\n\n```bash\ncat <<'EOF' > /testbed/django/utils/dateparse.py\n\"\"\"Functions to parse datetime objects.\"\"\"\n\n# We're using regular expressions rather than time.strptime because:\n# - They provide both validation and parsing.\n# - They're more flexible for datetimes.\n# - The date/datetime/time constructors produce friendlier error messages.\n\nimport datetime\n\nfrom django.utils.regex_helper import _lazy_re_compile\nfrom django.utils.timezone import get_fixed_timezone, utc\n\ndate_re = _lazy_re_compile(\n    r'(?P<year>\\d{4})-(?P<month>\\d{1,2})-(?P<day>\\d{1,2})$'\n)\n\ntime_re = _lazy_re_compile(\n    r'(?P<hour>\\d{1,2}):(?P<minute>\\d{1,2})'\n    r'(?::(?P<second>\\d{1,2})(?:[\\.,](?P<microsecond>\\d{1,6})\\d{0,6})?)?'\n)\n\ndatetime_re = _lazy_re_compile(\n    r'(?P<year>\\d{4})-(?P<month>\\d{1,2})-(?P<day>\\d{1,2})'\n    r'[T ](?P<hour>\\d{1,2}):(?P<minute>\\d{1,2})'\n    r'(?::(?P<second>\\d{1,2})(?:[\\.,](?P<microsecond>\\d{1,6})\\d{0,6})?)?'\n    r'(?P<tzinfo>Z|[+-]\\d{2}(?::?\\d{2})?)?$'\n)\n\nstandard_duration_re = _lazy_re_compile(\n    r'^'\n    r'(?:(?P<days>-?\\d+) (days?, )?)?'\n    r'(?P<sign>-?)'\n    r'((?:(?P<hours>\\d+):)(?=\\d+:\\d+))?'\n    r'(?:(?P<minutes>\\d+):)?'\n    r'(?P<seconds>\\d+)'\n    r'(?:[\\.,](?P<microseconds>\\d{1,6})\\d{0,6})?'\n    r'$'\n)\n\n# Support the sections of ISO 8601 date representation that are accepted by\n# timedelta\niso8601_duration_re = _lazy_re_compile(\n    r'^(?P<sign>[-+]?)'\n    r'P'\n    r'(?:(?P<days>\\d+(.\\d+)?)D)?'\n    r'(?:T'\n    r'(?:(?P<hours>\\d+(.\\d+)?)H)?'\n    r'(?:(?P<minutes>\\d+(.\\d+)?)M)?'\n    r'(?:(?P<seconds>\\d+(.\\d+)?)S)?'\n    r')?'\n    r'$'\n)\n\n# Support PostgreSQL's day-time interval format, e.g. \"3 days 04:05:06\". The\n# year-month and mixed intervals cannot be converted to a timedelta and thus\n# aren't accepted.\npostgres_interval_re = _lazy_re_compile(\n    r'^'\n    r'(?:(?P<days>-?\\d+) (days? ?))?'\n    r'(?:(?P<sign>[-+])?'\n    r'(?P<hours>\\d+):'\n    r'(?P<minutes>\\d\\d):'\n    r'(?P<seconds>\\d\\d)'\n    r'(?:\\.(?P<microseconds>\\d{1,6}))?'\n    r')?$'\n)\n\n\ndef parse_date(value):\n    \"\"\"Parse a string and return a datetime.date.\n\n    Raise ValueError if the input is well formatted but not a valid date.\n    Return None if the input isn't well formatted.\n    \"\"\"\n    match = date_re.match(value)\n    if match:\n        kw = {k: int(v) for k, v in match.groupdict().items()}\n        return datetime.date(**kw)\n\n\ndef parse_time(value):\n    \"\"\"Parse a string and return a datetime.time.\n\n    This function doesn't support time zone offsets.\n\n    Raise ValueError if the input is well formatted but not a valid time.\n    Return None if the input isn't well formatted, in particular if it\n    contains an offset.\n    \"\"\"\n    match = time_re.match(value)\n    if match:\n        kw = match.groupdict()\n        kw['microsecond'] = kw['microsecond'] and kw['microsecond'].ljust(6, '0')\n        kw = {k: int(v) for k, v in kw.items() if v is not None}\n        return datetime.time(**kw)\n\n\ndef parse_datetime(value):\n    \"\"\"Parse a string and return a datetime.datetime.\n\n    This function supports time zone offsets. When the input contains one,\n    the output uses a timezone with a fixed offset from UTC.\n\n    Raise ValueError if the input is well formatted but not a valid datetime.\n    Return None if the input isn't well formatted.\n    \"\"\"\n    match = datetime_re.match(value)\n    if match:\n        kw = match.groupdict()\n        kw['microsecond'] = kw['microsecond'] and kw['microsecond'].ljust(6, '0')\n        tzinfo = kw.pop('tzinfo')\n        if tzinfo == 'Z':\n            tzinfo = utc\n        elif tzinfo is not None:\n            offset_mins = int(tzinfo[-2:]) if len(tzinfo) > 3 else 0\n            offset = 60 * int(tzinfo[1:3]) + offset_mins\n            if tzinfo[0] == '-':\n                offset = -offset\n            tzinfo = get_fixed_timezone(offset)\n        kw = {k: int(v) for k, v in kw.items() if v is not None}\n        kw['tzinfo'] = tzinfo\n        return datetime.datetime(**kw)\n\n\ndef parse_duration(value):\n    \"\"\"Parse a duration string and return a datetime.timedelta.\n\n    The preferred format for durations in Django is '%d %H:%M:%S.%f'.\n\n    Also supports ISO 8601 representation and PostgreSQL's day-time interval\n    format.\n    \"\"\"\n    match = standard_duration_re.match(value)\n    if not match:\n        match = iso8601_duration_re.match(value)\n        is_iso8601 = True\n    else:\n        is_iso8601 = False\n    if not match:\n        match = postgres_interval_re.match(value)\n    if match:\n        kw = match.groupdict()\n        sign = -1 if kw.pop('sign', '+') == '-' else 1\n        if kw.get('microseconds'):\n            kw['microseconds'] = kw['microseconds'].ljust(6, '0')\n        if kw.get('seconds') and kw.get('microseconds') and kw['seconds'].startswith('-'):\n            kw['microseconds'] = '-' + kw['microseconds']\n        kw = {k: float(v.replace(',', '.')) for k, v in kw.items() if v is not None}\n        days = datetime.timedelta(kw.pop('days', .0) or .0)\n        if is_iso8601:\n            # For ISO 8601, sign applies to entire duration\n            return sign * (days + datetime.timedelta(**kw))\n        else:\n            # For standard/PostgreSQL, days have their own sign\n            return days + sign * datetime.timedelta(**kw)\nEOF\n```",
-    "reward": 0.05237880615236902
+    "reward": 0.41878190459674114
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me verify the fix by running the reproduction script again:\n\n```bash\ncd /testbed && python reproduce_bug.py\n```",
-    "reward": -0.16270198974605163
+    "reward": 0.03130317432790186
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works for ISO 8601 durations. Now I need to verify that the fix doesn't break the standard and PostgreSQL formats. Let me create a comprehensive test script:\n\n```bash\ncat <<'EOF' > /testbed/test_all_formats.py\n#!/usr/bin/env python\n\"\"\"Test all duration formats to ensure no regressions.\"\"\"\n\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom datetime import timedelta\nfrom django.utils.dateparse import parse_duration\n\nprint(\"Testing all duration formats\")\nprint(\"=\" * 70)\n\n# Test standard format\nprint(\"\\n1. Standard format tests:\")\ntest_cases = [\n    ('1 day, 2:03:04', timedelta(days=1, hours=2, minutes=3, seconds=4)),\n    ('-1 day, 2:03:04', timedelta(days=-1, hours=2, minutes=3, seconds=4)),\n    ('1 day, -2:03:04', timedelta(days=1, hours=-2, minutes=-3, seconds=-4)),\n    ('-1 day, -2:03:04', timedelta(days=-1, hours=-2, minutes=-3, seconds=-4)),\n    ('2:03:04', timedelta(hours=2, minutes=3, seconds=4)),\n    ('-2:03:04', timedelta(hours=-2, minutes=-3, seconds=-4)),\n    ('1:23', timedelta(minutes=1, seconds=23)),\n    ('45', timedelta(seconds=45)),\n    ('1 day', timedelta(days=1)),\n    ('-1 day', timedelta(days=-1)),\n]\n\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"\u2713\" if match else \"\u2717\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\n# Test ISO 8601 format\nprint(\"\\n2. ISO 8601 format tests:\")\ntest_cases = [\n    ('P1D', timedelta(days=1)),\n    ('-P1D', timedelta(days=-1)),\n    ('P5D', timedelta(days=5)),\n    ('-P5D', timedelta(days=-5)),\n    ('PT2H', timedelta(hours=2)),\n    ('-PT2H', timedelta(hours=-2)),\n    ('P1DT2H', timedelta(days=1, hours=2)),\n    ('-P1DT2H', timedelta(days=-1, hours=-2)),\n    ('P1DT2H3M4S', timedelta(days=1, hours=2, minutes=3, seconds=4)),\n    ('-P1DT2H3M4S', timedelta(days=-1, hours=-2, minutes=-3, seconds=-4)),\n    ('PT0.5S', timedelta(seconds=0.5)),\n    ('-PT0.5S', timedelta(seconds=-0.5)),\n]\n\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"\u2713\" if match else \"\u2717\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\n# Test PostgreSQL format\nprint(\"\\n3. PostgreSQL format tests:\")\ntest_cases = [\n    ('3 days 04:05:06', timedelta(days=3, hours=4, minutes=5, seconds=6)),\n    ('-3 days 04:05:06', timedelta(days=-3, hours=4, minutes=5, seconds=6)),\n    ('3 days -04:05:06', timedelta(days=3, hours=-4, minutes=-5, seconds=-6)),\n    ('-3 days -04:05:06', timedelta(days=-3, hours=-4, minutes=-5, seconds=-6)),\n    ('04:05:06', timedelta(hours=4, minutes=5, seconds=6)),\n    ('-04:05:06', timedelta(hours=-4, minutes=-5, seconds=-6)),\n]\n\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"\u2713\" if match else \"\u2717\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"All tests completed!\")\nEOF\npython /testbed/test_all_formats.py\n```",
-    "reward": -0.18783664957675272
+    "reward": -0.031161376120163564
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me fix the unicode issue in the test script:\n\n```bash\ncat <<'EOF' > /testbed/test_all_formats.py\n#!/usr/bin/env python\n\"\"\"Test all duration formats to ensure no regressions.\"\"\"\n\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom datetime import timedelta\nfrom django.utils.dateparse import parse_duration\n\nprint(\"Testing all duration formats\")\nprint(\"=\" * 70)\n\n# Test standard format\nprint(\"\\n1. Standard format tests:\")\ntest_cases = [\n    ('1 day, 2:03:04', timedelta(days=1, hours=2, minutes=3, seconds=4)),\n    ('-1 day, 2:03:04', timedelta(days=-1, hours=2, minutes=3, seconds=4)),\n    ('1 day, -2:03:04', timedelta(days=1, hours=-2, minutes=-3, seconds=-4)),\n    ('-1 day, -2:03:04', timedelta(days=-1, hours=-2, minutes=-3, seconds=-4)),\n    ('2:03:04', timedelta(hours=2, minutes=3, seconds=4)),\n    ('-2:03:04', timedelta(hours=-2, minutes=-3, seconds=-4)),\n    ('1:23', timedelta(minutes=1, seconds=23)),\n    ('45', timedelta(seconds=45)),\n    ('1 day', timedelta(days=1)),\n    ('-1 day', timedelta(days=-1)),\n]\n\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"PASS\" if match else \"FAIL\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\n# Test ISO 8601 format\nprint(\"\\n2. ISO 8601 format tests:\")\ntest_cases = [\n    ('P1D', timedelta(days=1)),\n    ('-P1D', timedelta(days=-1)),\n    ('P5D', timedelta(days=5)),\n    ('-P5D', timedelta(days=-5)),\n    ('PT2H', timedelta(hours=2)),\n    ('-PT2H', timedelta(hours=-2)),\n    ('P1DT2H', timedelta(days=1, hours=2)),\n    ('-P1DT2H', timedelta(days=-1, hours=-2)),\n    ('P1DT2H3M4S', timedelta(days=1, hours=2, minutes=3, seconds=4)),\n    ('-P1DT2H3M4S', timedelta(days=-1, hours=-2, minutes=-3, seconds=-4)),\n    ('PT0.5S', timedelta(seconds=0.5)),\n    ('-PT0.5S', timedelta(seconds=-0.5)),\n]\n\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"PASS\" if match else \"FAIL\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\n# Test PostgreSQL format\nprint(\"\\n3. PostgreSQL format tests:\")\ntest_cases = [\n    ('3 days 04:05:06', timedelta(days=3, hours=4, minutes=5, seconds=6)),\n    ('-3 days 04:05:06', timedelta(days=-3, hours=4, minutes=5, seconds=6)),\n    ('3 days -04:05:06', timedelta(days=3, hours=-4, minutes=-5, seconds=-6)),\n    ('-3 days -04:05:06', timedelta(days=-3, hours=-4, minutes=-5, seconds=-6)),\n    ('04:05:06', timedelta(hours=4, minutes=5, seconds=6)),\n    ('-04:05:06', timedelta(hours=-4, minutes=-5, seconds=-6)),\n]\n\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"PASS\" if match else \"FAIL\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"All tests completed!\")\nEOF\npython /testbed/test_all_formats.py\n```",
-    "reward": 0.02027225070541209
+    "reward": 0.28139770646639406
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see there are two failures in the PostgreSQL format tests. Let me investigate what's happening. The issue is with cases like '3 days -04:05:06' and '-3 days -04:05:06'. Let me check if these are actually valid PostgreSQL formats and what the expected behavior should be. Let me look at the regex pattern more carefully:\n\n```bash\ncat <<'EOF' > /testbed/check_postgres_format.py\n#!/usr/bin/env python\n\"\"\"Check PostgreSQL format parsing.\"\"\"\n\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom datetime import timedelta\nfrom django.utils.dateparse import parse_duration, postgres_interval_re\n\n# Test what PostgreSQL actually accepts\ntest_cases = [\n    '3 days 04:05:06',\n    '-3 days 04:05:06',\n    '3 days -04:05:06',\n    '-3 days -04:05:06',\n]\n\nprint(\"PostgreSQL format regex matching:\")\nfor test in test_cases:\n    match = postgres_interval_re.match(test)\n    if match:\n        print(f\"  '{test}' matches: {match.groupdict()}\")\n    else:\n        print(f\"  '{test}' does NOT match\")\n\nprint(\"\\nParsing results:\")\nfor test in test_cases:\n    result = parse_duration(test)\n    print(f\"  '{test}' -> {result}\")\nEOF\npython /testbed/check_postgres_format.py\n```",
-    "reward": 0.03378708450902015
+    "reward": 0.30232951077732345
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see the issue now. My fix is incorrectly treating PostgreSQL format as ISO 8601 in some cases. Let me check which regex is matching for these PostgreSQL cases:\n\n```bash\ncat <<'EOF' > /testbed/check_which_regex.py\n#!/usr/bin/env python\n\"\"\"Check which regex matches for different formats.\"\"\"\n\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom django.utils.dateparse import standard_duration_re, iso8601_duration_re, postgres_interval_re\n\ntest_cases = [\n    '3 days 04:05:06',\n    '-3 days 04:05:06',\n    '3 days -04:05:06',\n    '-3 days -04:05:06',\n    'P1D',\n    '-P1D',\n    '1 day, 2:03:04',\n]\n\nprint(\"Regex matching order:\")\nfor test in test_cases:\n    std_match = standard_duration_re.match(test)\n    iso_match = iso8601_duration_re.match(test)\n    pg_match = postgres_interval_re.match(test)\n    \n    print(f\"\\n'{test}':\")\n    print(f\"  Standard: {bool(std_match)}\")\n    print(f\"  ISO 8601: {bool(iso_match)}\")\n    print(f\"  PostgreSQL: {bool(pg_match)}\")\n    \n    # Show which would be selected first\n    if std_match:\n        print(f\"  -> Would use: Standard\")\n    elif iso_match:\n        print(f\"  -> Would use: ISO 8601\")\n    elif pg_match:\n        print(f\"  -> Would use: PostgreSQL\")\nEOF\npython /testbed/check_which_regex.py\n```",
-    "reward": 0.05631180751503358
+    "reward": 0.3372158512955391
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! The regex matching is working correctly. The PostgreSQL format cases are being matched by the PostgreSQL regex, not ISO 8601. So my fix should be working correctly for those cases. Let me re-examine what the expected behavior should be for PostgreSQL format.\n\nLooking at the test failures:\n- '3 days -04:05:06' -> Got: -4 days, 19:54:54, Expected: 2 days, 19:54:54\n- '-3 days -04:05:06' -> Got: 2 days, 19:54:54, Expected: -4 days, 19:54:54\n\nWait, I think my expected values in the test were wrong. Let me check what the actual PostgreSQL behavior should be and what the original code was doing:\n\n```bash\ncat <<'EOF' > /testbed/check_original_behavior.py\n#!/usr/bin/env python\n\"\"\"Check what the original behavior was for these cases.\"\"\"\n\nfrom datetime import timedelta\n\n# Let's manually calculate what these should be:\n# '3 days -04:05:06' means: 3 days + (-04:05:06)\n# = 3 days - 4 hours - 5 minutes - 6 seconds\n# = 3 days - 14706 seconds\n# = 3 days - 0.170208333... days\n# = 2.829791667 days\n# = 2 days + 0.829791667 * 86400 seconds\n# = 2 days + 71674 seconds\n# = 2 days + 19 hours + 54 minutes + 34 seconds\n\nprint(\"Manual calculation for '3 days -04:05:06':\")\ntd = timedelta(days=3, hours=-4, minutes=-5, seconds=-6)\nprint(f\"  timedelta(days=3, hours=-4, minutes=-5, seconds=-6) = {td}\")\n\nprint(\"\\nManual calculation for '-3 days -04:05:06':\")\ntd = timedelta(days=-3, hours=-4, minutes=-5, seconds=-6)\nprint(f\"  timedelta(days=-3, hours=-4, minutes=-5, seconds=-6) = {td}\")\n\n# What my code is producing:\n# For '3 days -04:05:06':\n# days = timedelta(days=3)\n# sign = -1\n# kw = {hours: 4, minutes: 5, seconds: 6}\n# return days + sign * timedelta(**kw)\n# = timedelta(days=3) + (-1) * timedelta(hours=4, minutes=5, seconds=6)\n# = timedelta(days=3) - timedelta(hours=4, minutes=5, seconds=6)\n# = timedelta(days=3, hours=-4, minutes=-5, seconds=-6)\n\nprint(\"\\nWhat my code produces for '3 days -04:05:06':\")\ndays = timedelta(days=3)\nsign = -1\nkw = {'hours': 4, 'minutes': 5, 'seconds': 6}\nresult = days + sign * timedelta(**kw)\nprint(f\"  {result}\")\n\nprint(\"\\nWhat my code produces for '-3 days -04:05:06':\")\ndays = timedelta(days=-3)\nsign = -1\nkw = {'hours': 4, 'minutes': 5, 'seconds': 6}\nresult = days + sign * timedelta(**kw)\nprint(f\"  {result}\")\nEOF\npython /testbed/check_original_behavior.py\n```",
-    "reward": 0.09385301252505597
+    "reward": 0.3953597521592319
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Ah! I see the issue now. My code is actually producing the CORRECT results, but my test expectations were wrong. Let me verify this is what the code is actually producing:\n\n```bash\ncat <<'EOF' > /testbed/verify_postgres.py\n#!/usr/bin/env python\n\"\"\"Verify PostgreSQL format parsing.\"\"\"\n\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom datetime import timedelta\nfrom django.utils.dateparse import parse_duration\n\ntest_cases = [\n    ('3 days -04:05:06', timedelta(days=3, hours=-4, minutes=-5, seconds=-6)),\n    ('-3 days -04:05:06', timedelta(days=-3, hours=-4, minutes=-5, seconds=-6)),\n]\n\nprint(\"PostgreSQL format verification:\")\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    print(f\"  '{input_str}'\")\n    print(f\"    Result:   {result}\")\n    print(f\"    Expected: {expected}\")\n    print(f\"    Match: {match}\")\nEOF\npython /testbed/verify_postgres.py\n```",
-    "reward": 0.15642168754175995
+    "reward": 0.4922662535987199
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Wait, there's still an issue. My code is producing the wrong results. Let me trace through what's happening step by step. The issue is that `is_iso8601` is not being set correctly when PostgreSQL format matches. Let me check the logic:\n\n```bash\ncat <<'EOF' > /testbed/debug_postgres.py\n#!/usr/bin/env python\n\"\"\"Debug PostgreSQL format parsing.\"\"\"\n\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom django.utils.dateparse import standard_duration_re, iso8601_duration_re, postgres_interval_re\n\ntest = '3 days -04:05:06'\n\nprint(f\"Testing: '{test}'\")\nprint()\n\n# Simulate the logic in parse_duration\nmatch = standard_duration_re.match(test)\nprint(f\"1. standard_duration_re.match(test) = {match}\")\n\nif not match:\n    match = iso8601_duration_re.match(test)\n    is_iso8601 = True\n    print(f\"2. iso8601_duration_re.match(test) = {match}\")\n    print(f\"   is_iso8601 = {is_iso8601}\")\nelse:\n    is_iso8601 = False\n    print(f\"   is_iso8601 = {is_iso8601}\")\n\nif not match:\n    match = postgres_interval_re.match(test)\n    print(f\"3. postgres_interval_re.match(test) = {match}\")\n\nprint()\nprint(f\"Final: match = {match}, is_iso8601 = {is_iso8601}\")\nprint(f\"Match groups: {match.groupdict() if match else None}\")\nEOF\npython /testbed/debug_postgres.py\n```",
-    "reward": 0.26070281256959993
+    "reward": 0.6537770893311998
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Aha! I found the bug in my fix. When the standard regex doesn't match, I set `is_iso8601 = True`, but then if the ISO 8601 regex also doesn't match and we fall through to PostgreSQL, `is_iso8601` is still `True`! I need to fix this logic:\n\n```bash\ncat <<'EOF' > /testbed/django/utils/dateparse.py\n\"\"\"Functions to parse datetime objects.\"\"\"\n\n# We're using regular expressions rather than time.strptime because:\n# - They provide both validation and parsing.\n# - They're more flexible for datetimes.\n# - The date/datetime/time constructors produce friendlier error messages.\n\nimport datetime\n\nfrom django.utils.regex_helper import _lazy_re_compile\nfrom django.utils.timezone import get_fixed_timezone, utc\n\ndate_re = _lazy_re_compile(\n    r'(?P<year>\\d{4})-(?P<month>\\d{1,2})-(?P<day>\\d{1,2})$'\n)\n\ntime_re = _lazy_re_compile(\n    r'(?P<hour>\\d{1,2}):(?P<minute>\\d{1,2})'\n    r'(?::(?P<second>\\d{1,2})(?:[\\.,](?P<microsecond>\\d{1,6})\\d{0,6})?)?'\n)\n\ndatetime_re = _lazy_re_compile(\n    r'(?P<year>\\d{4})-(?P<month>\\d{1,2})-(?P<day>\\d{1,2})'\n    r'[T ](?P<hour>\\d{1,2}):(?P<minute>\\d{1,2})'\n    r'(?::(?P<second>\\d{1,2})(?:[\\.,](?P<microsecond>\\d{1,6})\\d{0,6})?)?'\n    r'(?P<tzinfo>Z|[+-]\\d{2}(?::?\\d{2})?)?$'\n)\n\nstandard_duration_re = _lazy_re_compile(\n    r'^'\n    r'(?:(?P<days>-?\\d+) (days?, )?)?'\n    r'(?P<sign>-?)'\n    r'((?:(?P<hours>\\d+):)(?=\\d+:\\d+))?'\n    r'(?:(?P<minutes>\\d+):)?'\n    r'(?P<seconds>\\d+)'\n    r'(?:[\\.,](?P<microseconds>\\d{1,6})\\d{0,6})?'\n    r'$'\n)\n\n# Support the sections of ISO 8601 date representation that are accepted by\n# timedelta\niso8601_duration_re = _lazy_re_compile(\n    r'^(?P<sign>[-+]?)'\n    r'P'\n    r'(?:(?P<days>\\d+(.\\d+)?)D)?'\n    r'(?:T'\n    r'(?:(?P<hours>\\d+(.\\d+)?)H)?'\n    r'(?:(?P<minutes>\\d+(.\\d+)?)M)?'\n    r'(?:(?P<seconds>\\d+(.\\d+)?)S)?'\n    r')?'\n    r'$'\n)\n\n# Support PostgreSQL's day-time interval format, e.g. \"3 days 04:05:06\". The\n# year-month and mixed intervals cannot be converted to a timedelta and thus\n# aren't accepted.\npostgres_interval_re = _lazy_re_compile(\n    r'^'\n    r'(?:(?P<days>-?\\d+) (days? ?))?'\n    r'(?:(?P<sign>[-+])?'\n    r'(?P<hours>\\d+):'\n    r'(?P<minutes>\\d\\d):'\n    r'(?P<seconds>\\d\\d)'\n    r'(?:\\.(?P<microseconds>\\d{1,6}))?'\n    r')?$'\n)\n\n\ndef parse_date(value):\n    \"\"\"Parse a string and return a datetime.date.\n\n    Raise ValueError if the input is well formatted but not a valid date.\n    Return None if the input isn't well formatted.\n    \"\"\"\n    match = date_re.match(value)\n    if match:\n        kw = {k: int(v) for k, v in match.groupdict().items()}\n        return datetime.date(**kw)\n\n\ndef parse_time(value):\n    \"\"\"Parse a string and return a datetime.time.\n\n    This function doesn't support time zone offsets.\n\n    Raise ValueError if the input is well formatted but not a valid time.\n    Return None if the input isn't well formatted, in particular if it\n    contains an offset.\n    \"\"\"\n    match = time_re.match(value)\n    if match:\n        kw = match.groupdict()\n        kw['microsecond'] = kw['microsecond'] and kw['microsecond'].ljust(6, '0')\n        kw = {k: int(v) for k, v in kw.items() if v is not None}\n        return datetime.time(**kw)\n\n\ndef parse_datetime(value):\n    \"\"\"Parse a string and return a datetime.datetime.\n\n    This function supports time zone offsets. When the input contains one,\n    the output uses a timezone with a fixed offset from UTC.\n\n    Raise ValueError if the input is well formatted but not a valid datetime.\n    Return None if the input isn't well formatted.\n    \"\"\"\n    match = datetime_re.match(value)\n    if match:\n        kw = match.groupdict()\n        kw['microsecond'] = kw['microsecond'] and kw['microsecond'].ljust(6, '0')\n        tzinfo = kw.pop('tzinfo')\n        if tzinfo == 'Z':\n            tzinfo = utc\n        elif tzinfo is not None:\n            offset_mins = int(tzinfo[-2:]) if len(tzinfo) > 3 else 0\n            offset = 60 * int(tzinfo[1:3]) + offset_mins\n            if tzinfo[0] == '-':\n                offset = -offset\n            tzinfo = get_fixed_timezone(offset)\n        kw = {k: int(v) for k, v in kw.items() if v is not None}\n        kw['tzinfo'] = tzinfo\n        return datetime.datetime(**kw)\n\n\ndef parse_duration(value):\n    \"\"\"Parse a duration string and return a datetime.timedelta.\n\n    The preferred format for durations in Django is '%d %H:%M:%S.%f'.\n\n    Also supports ISO 8601 representation and PostgreSQL's day-time interval\n    format.\n    \"\"\"\n    match = standard_duration_re.match(value)\n    is_iso8601 = False\n    if not match:\n        match = iso8601_duration_re.match(value)\n        if match:\n            is_iso8601 = True\n    if not match:\n        match = postgres_interval_re.match(value)\n    if match:\n        kw = match.groupdict()\n        sign = -1 if kw.pop('sign', '+') == '-' else 1\n        if kw.get('microseconds'):\n            kw['microseconds'] = kw['microseconds'].ljust(6, '0')\n        if kw.get('seconds') and kw.get('microseconds') and kw['seconds'].startswith('-'):\n            kw['microseconds'] = '-' + kw['microseconds']\n        kw = {k: float(v.replace(',', '.')) for k, v in kw.items() if v is not None}\n        days = datetime.timedelta(kw.pop('days', .0) or .0)\n        if is_iso8601:\n            # For ISO 8601, sign applies to entire duration\n            return sign * (days + datetime.timedelta(**kw))\n        else:\n            # For standard/PostgreSQL, days have their own sign\n            return days + sign * datetime.timedelta(**kw)\nEOF\n```",
-    "reward": 0.4345046876159999
+    "reward": 0.9229618155519999
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me test the fix again with all formats:\n\n```bash\npython /testbed/test_all_formats.py\n```",
-    "reward": 0.7241744793599999
+    "reward": 1.3716030259199998
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass now. Let me also run the original reproduction script to confirm the bug is fixed:\n\n```bash\npython /testbed/reproduce_bug.py\n```",
-    "reward": 0.45695746559999995
+    "reward": 1.0360050431999999
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix is working correctly. Now let me run Django's existing tests to make sure I haven't broken anything:\n\n```bash\ncd /testbed && python -m pytest tests/utils_tests/test_dateparse.py -xvs\n```",
-    "reward": 0.261595776
+    "reward": 0.7266750719999999
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try running the tests using Django's test runner:\n\n```bash\ncd /testbed && python -m django test utils_tests.test_dateparse --settings=tests.test_sqlite\n```",
-    "reward": -0.06400704000000002
+    "reward": 0.21112512
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me find the correct way to run the tests:\n\n```bash\ncd /testbed && python tests/runtests.py utils_tests.test_dateparse\n```",
-    "reward": 0.3933216
+    "reward": 0.8518751999999999
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All the existing Django tests pass. Now let me create a more comprehensive edge case test to ensure the fix is robust:\n\n```bash\ncat <<'EOF' > /testbed/test_edge_cases.py\n#!/usr/bin/env python\n\"\"\"Test edge cases for the parse_duration fix.\"\"\"\n\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom datetime import timedelta\nfrom django.utils.dateparse import parse_duration\n\nprint(\"Testing edge cases for parse_duration fix\")\nprint(\"=\" * 70)\n\n# Edge case 1: Zero duration with negative sign\nprint(\"\\n1. Zero duration with negative sign:\")\ntest_cases = [\n    ('-P0D', timedelta(0)),\n    ('-PT0H', timedelta(0)),\n    ('-PT0S', timedelta(0)),\n]\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"PASS\" if match else \"FAIL\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\n# Edge case 2: Positive sign explicitly specified\nprint(\"\\n2. Positive sign explicitly specified:\")\ntest_cases = [\n    ('+P1D', timedelta(days=1)),\n    ('+PT2H', timedelta(hours=2)),\n    ('+P1DT2H', timedelta(days=1, hours=2)),\n]\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"PASS\" if match else \"FAIL\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\n# Edge case 3: Large negative durations\nprint(\"\\n3. Large negative durations:\")\ntest_cases = [\n    ('-P100D', timedelta(days=-100)),\n    ('-P365D', timedelta(days=-365)),\n    ('-P1000DT23H59M59S', timedelta(days=-1000, hours=-23, minutes=-59, seconds=-59)),\n]\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"PASS\" if match else \"FAIL\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\n# Edge case 4: Fractional values with negative sign\nprint(\"\\n4. Fractional values with negative sign:\")\ntest_cases = [\n    ('-PT0.5H', timedelta(hours=-0.5)),\n    ('-PT1.5M', timedelta(minutes=-1.5)),\n    ('-PT2.5S', timedelta(seconds=-2.5)),\n]\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"PASS\" if match else \"FAIL\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\n# Edge case 5: Mixed positive and negative (standard format)\nprint(\"\\n5. Mixed positive and negative (standard format):\")\ntest_cases = [\n    ('5 days, -1:30:00', timedelta(days=5, hours=-1, minutes=-30)),\n    ('-5 days, 1:30:00', timedelta(days=-5, hours=1, minutes=30)),\n]\nfor input_str, expected in test_cases:\n    result = parse_duration(input_str)\n    match = result == expected\n    status = \"PASS\" if match else \"FAIL\"\n    print(f\"  {status} '{input_str}' -> {result} (Expected: {expected})\")\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"All edge case tests completed!\")\nEOF\npython /testbed/test_edge_cases.py\n```",
-    "reward": 0.155536
+    "reward": 0.419792
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All edge cases pass. Now let me verify the final implementation one more time to make sure it's clean and follows the feedback from the previous attempt:\n\n```bash\nnl -ba /testbed/django/utils/dateparse.py | sed -n '125,160p'\n```",
-    "reward": 0.09255999999999999
+    "reward": 0.36632
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The implementation is clean and correct. Let me create one final comprehensive test to document the behavior:\n\n```bash\ncat <<'EOF' > /testbed/final_verification.py\n#!/usr/bin/env python\n\"\"\"Final verification of the parse_duration fix.\"\"\"\n\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom datetime import timedelta\nfrom django.utils.dateparse import parse_duration\nfrom django.utils.duration import duration_iso_string\n\nprint(\"=\" * 70)\nprint(\"FINAL VERIFICATION: parse_duration() ISO 8601 negative sign fix\")\nprint(\"=\" * 70)\n\n# Test the exact bug reported in the PR\nprint(\"\\n1. Original bug report test:\")\ntd = timedelta(days=-1)\niso_str = duration_iso_string(td)\nparsed = parse_duration(iso_str)\nprint(f\"   timedelta(days=-1) -> '{iso_str}' -> {parsed}\")\nprint(f\"   Round-trip match: {td == parsed} (Expected: True)\")\n\n# Test with microseconds (this was working before)\ntd = timedelta(days=-1, microseconds=1)\niso_str = duration_iso_string(td)\nparsed = parse_duration(iso_str)\nprint(f\"\\n   timedelta(days=-1, microseconds=1) -> '{iso_str}' -> {parsed}\")\nprint(f\"   Round-trip match: {td == parsed} (Expected: True)\")\n\n# Summary of the fix\nprint(\"\\n2. Summary of the fix:\")\nprint(\"   - ISO 8601 format: Sign applies to ENTIRE duration\")\nprint(\"   - Standard format: Days have their own sign, separate sign for time\")\nprint(\"   - PostgreSQL format: Days have their own sign, separate sign for time\")\n\n# Test all three formats with negative values\nprint(\"\\n3. Format-specific behavior:\")\n\nprint(\"\\n   ISO 8601 format:\")\ntest_cases = [\n    ('-P1D', timedelta(days=-1)),\n    ('-P1DT2H', timedelta(days=-1, hours=-2)),\n    ('-PT2H', timedelta(hours=-2)),\n]\nfor iso_str, expected in test_cases:\n    result = parse_duration(iso_str)\n    match = result == expected\n    print(f\"     '{iso_str}' -> {result} (Match: {match})\")\n\nprint(\"\\n   Standard format:\")\ntest_cases = [\n    ('-1 day', timedelta(days=-1)),\n    ('1 day, -2:00:00', timedelta(days=1, hours=-2)),\n    ('-1 day, -2:00:00', timedelta(days=-1, hours=-2)),\n]\nfor std_str, expected in test_cases:\n    result = parse_duration(std_str)\n    match = result == expected\n    print(f\"     '{std_str}' -> {result} (Match: {match})\")\n\nprint(\"\\n   PostgreSQL format:\")\ntest_cases = [\n    ('-3 days 04:05:06', timedelta(days=-3, hours=4, minutes=5, seconds=6)),\n    ('3 days -04:05:06', timedelta(days=3, hours=-4, minutes=-5, seconds=-6)),\n]\nfor pg_str, expected in test_cases:\n    result = parse_duration(pg_str)\n    match = result == expected\n    print(f\"     '{pg_str}' -> {result} (Match: {match})\")\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"VERIFICATION COMPLETE: All tests passed!\")\nprint(\"=\" * 70)\nEOF\npython /testbed/final_verification.py\n```",
-    "reward": 0.23759999999999998
+    "reward": 0.5272
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Everything is working correctly. Let me now review the implementation one more time to ensure it follows best practices and is clean:\n\n```bash\ncat /testbed/django/utils/dateparse.py | grep -A 35 \"def parse_duration\"\n```",
-    "reward": 0.39599999999999996
+    "reward": 0.712
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The implementation looks good and clean. Let me run the Django test suite one more time to ensure everything is working:\n\n```bash\ncd /testbed && python tests/runtests.py utils_tests.test_dateparse -v 2\n```",
-    "reward": 0.6599999999999999
+    "reward": 1.02
   },
   {
     "role": "user",
@@ -396,7 +396,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me create a summary document of the changes and submit the final output:\n\n```bash\ncat <<'EOF' > /testbed/CHANGES_SUMMARY.md\n# Fix for parse_duration() ISO 8601 Sign Bug\n\n## Problem\nThe `parse_duration()` function in `django/utils/dateparse.py` was ignoring the sign of ISO 8601 duration strings when the duration only contained days (e.g., `-P1D`).\n\n## Root Cause\nThe original implementation applied the sign only to the time components (hours, minutes, seconds) but not to the days component. This worked fine when time components were present (because the negative time would \"borrow\" from days), but failed when only days were specified.\n\n## Solution\nModified `parse_duration()` to detect which format (ISO 8601, standard, or PostgreSQL) matched the input string and apply the sign accordingly:\n\n- **ISO 8601 format**: Sign applies to the ENTIRE duration (days + time)\n- **Standard/PostgreSQL formats**: Days have their own sign; the separate sign applies only to time components\n\n## Implementation Details\n1. Added `is_iso8601` flag to track when ISO 8601 regex matches\n2. Modified return logic to branch based on format:\n   - ISO 8601: `return sign * (days + datetime.timedelta(**kw))`\n   - Other formats: `return days + sign * datetime.timedelta(**kw)` (original behavior)\n\n## Testing\n- All existing Django tests pass\n- Bug reproduction cases now work correctly\n- Edge cases tested (zero durations, large values, fractional values, etc.)\n- No regressions in standard or PostgreSQL format parsing\nEOF\ncat /testbed/CHANGES_SUMMARY.md\n```",
-    "reward": 0.6
+    "reward": 0.7
   },
   {
     "role": "user",

@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the PR description.\n\n```bash\nls -la\n```",
-    "reward": 0.05436303854543432
+    "reward": 0.32236185395009975
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me locate the manager.py file mentioned in the PR description. It should be in django/db/models/manager.py.\n\n```bash\nfind . -name \"manager.py\" -path \"*/db/models/*\" | head -5\n```",
-    "reward": 0.09060506424239054
+    "reward": 0.3706030899168329
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, found the file. Let me examine the current implementation of the manager.py file, particularly around line 84 mentioned in the PR description.\n\n```bash\ncat django/db/models/manager.py\n```",
-    "reward": 0.15100844040398423
+    "reward": 0.4510051498613882
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see the issue. In the `_get_queryset_methods` method (lines 84-106), the `create_method` function manually assigns `__name__` and `__doc__` to the wrapper function, but doesn't use `functools.wraps`. This means that `inspect.signature()` doesn't get the correct signature information.\n\nLet me first create a reproduction script to verify the issue exists:\n\n```bash\ncat <<'EOF' > reproduce_issue.py\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\n\n# Create minimal settings\nwith open('test_settings.py', 'w') as f:\n    f.write(\"\"\"\nSECRET_KEY = 'test-secret-key'\nINSTALLED_APPS = [\n    'django.contrib.contenttypes',\n]\nDATABASES = {\n    'default': {\n        'ENGINE': 'django.db.backends.sqlite3',\n        'NAME': ':memory:',\n    }\n}\nUSE_TZ = True\n\"\"\")\n\ndjango.setup()\n\nimport inspect\nfrom django.db import models\n\nclass Person(models.Model):\n    name = models.CharField(max_length=100)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"Testing inspect.signature on Person.objects.bulk_create:\")\nsig = inspect.signature(Person.objects.bulk_create)\nprint(f\"Current signature: {sig}\")\nprint(f\"Parameters: {list(sig.parameters.keys())}\")\n\n# Also check the QuerySet method directly for comparison\nfrom django.db.models import QuerySet\nqs_sig = inspect.signature(QuerySet.bulk_create)\nprint(f\"\\nQuerySet.bulk_create signature: {qs_sig}\")\nprint(f\"Parameters: {list(qs_sig.parameters.keys())}\")\n\n# Check if __wrapped__ attribute exists (it should after fix)\nprint(f\"\\nHas __wrapped__ attribute: {hasattr(Person.objects.bulk_create, '__wrapped__')}\")\nEOF\n```",
-    "reward": 0.001680734006640378
+    "reward": 0.25167524976898026
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script to confirm the issue:\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": 0.0028012233444006302
+    "reward": 0.25279208294830047
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The issue is confirmed. The manager method shows `(*args, **kwargs)` instead of the actual parameters. Now let me apply the fix by modifying the manager.py file to use `functools.wraps` instead of manually assigning `__name__` and `__doc__`.\n\n```bash\ncat <<'EOF' > fix_manager.py\nimport sys\n\n# Read the file\nwith open('django/db/models/manager.py', 'r') as f:\n    content = f.read()\n\n# Check if functools is already imported\nif 'import functools' not in content:\n    # Add functools import after the existing imports\n    content = content.replace(\n        'import copy\\nimport inspect\\nfrom importlib import import_module',\n        'import copy\\nimport functools\\nimport inspect\\nfrom importlib import import_module'\n    )\n\n# Replace the create_method function to use functools.wraps\nold_create_method = '''    @classmethod\n    def _get_queryset_methods(cls, queryset_class):\n        def create_method(name, method):\n            def manager_method(self, *args, **kwargs):\n                return getattr(self.get_queryset(), name)(*args, **kwargs)\n\n            manager_method.__name__ = method.__name__\n            manager_method.__doc__ = method.__doc__\n            return manager_method'''\n\nnew_create_method = '''    @classmethod\n    def _get_queryset_methods(cls, queryset_class):\n        def create_method(name, method):\n            @functools.wraps(method)\n            def manager_method(self, *args, **kwargs):\n                return getattr(self.get_queryset(), name)(*args, **kwargs)\n            return manager_method'''\n\ncontent = content.replace(old_create_method, new_create_method)\n\n# Write the modified content back\nwith open('django/db/models/manager.py', 'w') as f:\n    f.write(content)\n\nprint(\"Fix applied successfully!\")\nEOF\n\npython fix_manager.py\n```",
-    "reward": 0.00466870557400105
+    "reward": 0.2546534715805008
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me verify the fix was applied correctly by viewing the modified section:\n\n```bash\nnl -ba django/db/models/manager.py | sed -n '1,95p'\n```",
-    "reward": 0.007781175956668418
+    "reward": 0.25775578596750126
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix has been applied correctly:\n1. `functools` import was added on line 2\n2. The `@functools.wraps(method)` decorator was added on line 85\n3. The manual `__name__` and `__doc__` assignments were removed\n\nNow let me test the fix by running the reproduction script again:\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": 0.012968626594447363
+    "reward": 0.2629263099458355
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works perfectly. Now the manager method shows the correct signature (without 'self' which is expected for bound methods), and the `__wrapped__` attribute is present, confirming that `functools.wraps` is being used.\n\nLet me create a more comprehensive test to verify the fix works for multiple manager methods and edge cases:\n\n```bash\ncat <<'EOF' > test_comprehensive.py\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\n\n# Create minimal settings if not exists\nif not os.path.exists('test_settings.py'):\n    with open('test_settings.py', 'w') as f:\n        f.write(\"\"\"\nSECRET_KEY = 'test-secret-key'\nINSTALLED_APPS = [\n    'django.contrib.contenttypes',\n]\nDATABASES = {\n    'default': {\n        'ENGINE': 'django.db.backends.sqlite3',\n        'NAME': ':memory:',\n    }\n}\nUSE_TZ = True\n\"\"\")\n\ndjango.setup()\n\nimport inspect\nfrom django.db import models\n\nclass Person(models.Model):\n    name = models.CharField(max_length=100)\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Test multiple manager methods\ntest_methods = ['bulk_create', 'filter', 'get', 'create', 'update_or_create', 'get_or_create']\n\nprint(\"Testing inspect.signature on various manager methods:\\n\")\nfor method_name in test_methods:\n    if hasattr(Person.objects, method_name):\n        manager_method = getattr(Person.objects, method_name)\n        sig = inspect.signature(manager_method)\n        \n        # Get the corresponding QuerySet method\n        from django.db.models import QuerySet\n        qs_method = getattr(QuerySet, method_name)\n        qs_sig = inspect.signature(qs_method)\n        \n        # Compare parameters (excluding 'self')\n        manager_params = list(sig.parameters.keys())\n        qs_params = [p for p in qs_sig.parameters.keys() if p != 'self']\n        \n        match = manager_params == qs_params\n        status = \"\u2713\" if match else \"\u2717\"\n        \n        print(f\"{status} {method_name}:\")\n        print(f\"  Manager:  {sig}\")\n        print(f\"  QuerySet: {qs_sig}\")\n        print(f\"  Has __wrapped__: {hasattr(manager_method, '__wrapped__')}\")\n        print()\n\n# Test that docstrings are preserved\nprint(\"\\nTesting docstring preservation:\")\nprint(f\"bulk_create docstring preserved: {Person.objects.bulk_create.__doc__ == QuerySet.bulk_create.__doc__}\")\nprint(f\"filter docstring preserved: {Person.objects.filter.__doc__ == QuerySet.filter.__doc__}\")\n\n# Test that __name__ is preserved\nprint(\"\\nTesting __name__ preservation:\")\nprint(f\"bulk_create __name__: {Person.objects.bulk_create.__name__}\")\nprint(f\"filter __name__: {Person.objects.filter.__name__}\")\n\nprint(\"\\n\u2713 All tests passed!\")\nEOF\n\npython test_comprehensive.py\n```",
-    "reward": 0.10494771099074561
+    "reward": 0.35487718324305917
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. The fix correctly preserves:\n1. Method signatures (with correct parameters)\n2. Docstrings\n3. Method names\n4. The `__wrapped__` attribute\n\nNow let me run the Django test suite to ensure there are no regressions. Let me start with the manager-related tests:\n\n```bash\ncd /testbed && python -m pytest tests/managers_regress/ -xvs 2>&1 | head -100\n```",
-    "reward": 0.008246184984575999
+    "reward": 0.258128638738432
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me use Django's test runner instead:\n\n```bash\ncd /testbed && python tests/runtests.py managers_regress --verbosity=2 2>&1 | head -150\n```",
-    "reward": 0.013743641640959998
+    "reward": 0.26354773123072
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! All manager regression tests pass. Let me also run some query-related tests to ensure the fix doesn't break anything:\n\n```bash\ncd /testbed && python tests/runtests.py queries --verbosity=2 2>&1 | tail -50\n```",
-    "reward": 0.022906069401599997
+    "reward": 0.2725795520512
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the actual test results for queries:\n\n```bash\ncd /testbed && python tests/runtests.py queries --verbosity=2 2>&1 | grep -E \"(OK|FAILED|ERROR|Ran [0-9]+ test)\"\n```",
-    "reward": 0.038176782336
+    "reward": 0.287632586752
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All query tests pass. Let me also run the introspection tests since they might be related to signature inspection:\n\n```bash\ncd /testbed && python tests/runtests.py introspection --verbosity=2 2>&1 | grep -E \"(OK|FAILED|ERROR|Ran [0-9]+ test)\"\n```",
-    "reward": 0.06362797056
+    "reward": 0.31272097792
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me create one more comprehensive test to verify the fix works correctly with IPython-style introspection (which was mentioned in the PR description):\n\n```bash\ncat <<'EOF' > test_ipython_style.py\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\n\nif not os.path.exists('test_settings.py'):\n    with open('test_settings.py', 'w') as f:\n        f.write(\"\"\"\nSECRET_KEY = 'test-secret-key'\nINSTALLED_APPS = [\n    'django.contrib.contenttypes',\n]\nDATABASES = {\n    'default': {\n        'ENGINE': 'django.db.backends.sqlite3',\n        'NAME': ':memory:',\n    }\n}\nUSE_TZ = True\n\"\"\")\n\ndjango.setup()\n\nimport inspect\nfrom django.db import models\n\nclass Person(models.Model):\n    name = models.CharField(max_length=100)\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Simulate what IPython does when you use Person.objects.bulk_create?\nprint(\"Simulating IPython-style introspection:\\n\")\nprint(\"=\" * 70)\n\nmethod = Person.objects.bulk_create\n\n# Get signature\nsig = inspect.signature(method)\nprint(f\"Signature: {method.__name__}{sig}\")\nprint()\n\n# Get docstring\nif method.__doc__:\n    print(\"Docstring:\")\n    print(method.__doc__[:500])  # First 500 chars\n    print()\n\n# Check metadata\nprint(\"Metadata:\")\nprint(f\"  __name__: {method.__name__}\")\nprint(f\"  __module__: {method.__module__}\")\nprint(f\"  __qualname__: {getattr(method, '__qualname__', 'N/A')}\")\nprint(f\"  __wrapped__: {hasattr(method, '__wrapped__')}\")\nprint(f\"  __annotations__: {method.__annotations__}\")\n\nprint()\nprint(\"=\" * 70)\nprint(\"\\n\u2713 IPython-style introspection works correctly!\")\nEOF\n\npython test_ipython_style.py\n```",
-    "reward": 0.1060466176
+    "reward": 0.3545349632
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works perfectly. Now let me verify the actual changes made to the file and ensure everything is correct:\n\n```bash\ncd /testbed && git diff django/db/models/manager.py\n```",
-    "reward": 0.010077695999999999
+    "reward": 0.25755827200000003
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The changes are minimal and correct:\n1. Added `import functools` at the top\n2. Added `@functools.wraps(method)` decorator to the `manager_method` function\n3. Removed the manual `__name__` and `__doc__` assignments\n\nThis is exactly what was needed according to the PR description. Let me run one final comprehensive test to ensure everything works as expected:\n\n```bash\ncat <<'EOF' > final_verification.py\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\n\nif not os.path.exists('test_settings.py'):\n    with open('test_settings.py', 'w') as f:\n        f.write(\"\"\"\nSECRET_KEY = 'test-secret-key'\nINSTALLED_APPS = [\n    'django.contrib.contenttypes',\n]\nDATABASES = {\n    'default': {\n        'ENGINE': 'django.db.backends.sqlite3',\n        'NAME': ':memory:',\n    }\n}\nUSE_TZ = True\n\"\"\")\n\ndjango.setup()\n\nimport inspect\nfrom django.db import models\nfrom django.db.models import QuerySet\n\nclass Person(models.Model):\n    name = models.CharField(max_length=100)\n    \n    class Meta:\n        app_label = 'test_app'\n\nprint(\"FINAL VERIFICATION TEST\")\nprint(\"=\" * 70)\n\n# Test 1: Signature correctness\nprint(\"\\n1. Testing signature correctness:\")\nmanager_sig = inspect.signature(Person.objects.bulk_create)\nqueryset_sig = inspect.signature(QuerySet.bulk_create)\n\nmanager_params = list(manager_sig.parameters.keys())\nqueryset_params = [p for p in queryset_sig.parameters.keys() if p != 'self']\n\nprint(f\"   Manager signature:  {manager_sig}\")\nprint(f\"   QuerySet signature: {queryset_sig}\")\nprint(f\"   Parameters match: {manager_params == queryset_params}\")\nassert manager_params == queryset_params, \"Parameters don't match!\"\n\n# Test 2: Docstring preservation\nprint(\"\\n2. Testing docstring preservation:\")\nprint(f\"   Docstrings match: {Person.objects.bulk_create.__doc__ == QuerySet.bulk_create.__doc__}\")\nassert Person.objects.bulk_create.__doc__ == QuerySet.bulk_create.__doc__, \"Docstrings don't match!\"\n\n# Test 3: __name__ preservation\nprint(\"\\n3. Testing __name__ preservation:\")\nprint(f\"   Manager __name__: {Person.objects.bulk_create.__name__}\")\nprint(f\"   QuerySet __name__: {QuerySet.bulk_create.__name__}\")\nassert Person.objects.bulk_create.__name__ == QuerySet.bulk_create.__name__, \"__name__ doesn't match!\"\n\n# Test 4: __wrapped__ attribute\nprint(\"\\n4. Testing __wrapped__ attribute:\")\nprint(f\"   Has __wrapped__: {hasattr(Person.objects.bulk_create, '__wrapped__')}\")\nassert hasattr(Person.objects.bulk_create, '__wrapped__'), \"__wrapped__ attribute missing!\"\n\n# Test 5: Multiple methods\nprint(\"\\n5. Testing multiple manager methods:\")\ntest_methods = ['bulk_create', 'filter', 'get', 'create', 'update_or_create']\nall_pass = True\nfor method_name in test_methods:\n    manager_method = getattr(Person.objects, method_name)\n    qs_method = getattr(QuerySet, method_name)\n    \n    manager_sig = inspect.signature(manager_method)\n    qs_sig = inspect.signature(qs_method)\n    \n    manager_params = list(manager_sig.parameters.keys())\n    qs_params = [p for p in qs_sig.parameters.keys() if p != 'self']\n    \n    match = manager_params == qs_params\n    all_pass = all_pass and match\n    status = \"\u2713\" if match else \"\u2717\"\n    print(f\"   {status} {method_name}: {manager_sig}\")\n\nassert all_pass, \"Some methods don't have correct signatures!\"\n\n# Test 6: Functionality still works\nprint(\"\\n6. Testing that functionality still works:\")\ntry:\n    # This should work without errors (even though we're not actually creating objects)\n    sig = inspect.signature(Person.objects.all)\n    print(f\"   Person.objects.all() signature: {sig}\")\n    print(f\"   \u2713 Manager methods are still callable\")\nexcept Exception as e:\n    print(f\"   \u2717 Error: {e}\")\n    raise\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"\u2713 ALL TESTS PASSED!\")\nprint(\"=\" * 70)\nEOF\n\npython final_verification.py\n```",
-    "reward": 0.016796159999999997
+    "reward": 0.26259712
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. The fix is working correctly and preserves all the necessary metadata. Let me also run a quick test on the basic model tests to ensure there are no regressions:\n\n```bash\ncd /testbed && python tests/runtests.py basic --verbosity=2 2>&1 | grep -E \"(OK|FAILED|ERROR|Ran [0-9]+ test)\"\n```",
-    "reward": 0.027993599999999997
+    "reward": 0.2709952
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me check if there are any other similar patterns in the codebase that might need the same fix, as suggested in the new plan. Let me search for other places where __name__ and __doc__ are manually assigned in wrapper functions:\n\n```bash\ncd /testbed && grep -r \"__name__ = .*__name__\" --include=\"*.py\" django/ | grep -v \"test\" | grep -v \".pyc\"\n```",
-    "reward": 0.046655999999999996
+    "reward": 0.284992
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check that file to see if it needs a similar fix:\n\n```bash\ncat django/utils/decorators.py\n```",
-    "reward": 0.07776
+    "reward": 0.30832000000000004
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I can see that in `django/utils/decorators.py`, the `method_decorator` function manually sets `__name__` on line 82, but this is a different case - it's setting a custom name for debugging purposes (\"method_decorator(...)\"), not copying metadata from another function. This is intentional and doesn't need to be changed.\n\nThe file already uses `functools.wraps` and `update_wrapper` appropriately in other places, so there's no issue here.\n\nLet me check if there are any other patterns where __doc__ is manually assigned:\n\n```bash\ncd /testbed && grep -r \"__doc__ = .*__doc__\" --include=\"*.py\" django/ | grep -v \"test\" | grep -v \".pyc\" | head -20\n```",
-    "reward": 0.1296
+    "reward": 0.3472
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check these files to see if they need similar fixes:\n\n```bash\ncat django/views/generic/base.py | grep -A 10 -B 10 \"__doc__ = cls.__doc__\"\n```",
-    "reward": 0.216
+    "reward": 0.41200000000000003
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: This is in the `as_view()` method of class-based views. The comment explicitly states that `__name__` and `__qualname__` are intentionally left unchanged, so this is a deliberate design decision and doesn't need to be changed.\n\nLet me check the other file:\n\n```bash\ncat django/utils/functional.py | grep -A 10 -B 10 \"__doc__ = getattr\"\n```",
-    "reward": 0.36
+    "reward": 0.52
   },
   {
     "role": "user",
@@ -340,7 +340,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: This is in the `cached_property` class, which is a descriptor. It manually sets `__doc__` in the `__init__` method, which is appropriate for this use case since it's not a wrapper function but a descriptor class.\n\nBased on my analysis, the only place that needed the fix was `django/db/models/manager.py`, which we've already fixed. The other occurrences are either:\n1. Intentional design decisions (like in class-based views)\n2. Appropriate for their specific use cases (like descriptors)\n3. Setting custom names for debugging purposes\n\nNow let me create a final summary and submit the work:\n\n```bash\ncat <<'EOF' > CHANGES_SUMMARY.md\n# Summary of Changes\n\n## Issue\n`inspect.signature()` was returning incorrect signature information (`(*args, **kwargs)`) when used on Django manager methods like `Person.objects.bulk_create`, instead of showing the actual parameters from the underlying QuerySet method.\n\nThis affected tools like IPython and Jupyter that use `inspect.signature()` internally to display documentation.\n\n## Root Cause\nIn `django/db/models/manager.py`, the `_get_queryset_methods()` method was manually copying only `__name__` and `__doc__` attributes from QuerySet methods to manager methods, but not the complete metadata needed for proper introspection.\n\n## Solution\nReplaced manual attribute assignment with `functools.wraps()` decorator, which:\n1. Copies all relevant metadata (including signature information)\n2. Sets the `__wrapped__` attribute, which `inspect.signature()` uses to get the correct signature\n3. Follows Python best practices for wrapper functions\n\n## Changes Made\nFile: `django/db/models/manager.py`\n\n1. Added `import functools` at the top of the file\n2. Added `@functools.wraps(method)` decorator to the `manager_method` function in `create_method()`\n3. Removed manual `__name__` and `__doc__` assignments (now handled by `functools.wraps`)\n\n## Testing\n- Verified that `inspect.signature()` now returns correct signatures for manager methods\n- Confirmed all metadata is preserved: `__name__`, `__doc__`, `__module__`, `__qualname__`, `__annotations__`\n- Verified `__wrapped__` attribute is present\n- Ran Django test suites: managers_regress (14 tests), queries (458 tests), introspection (20 tests), basic (59 tests) - all passed\n- Tested multiple manager methods: bulk_create, filter, get, create, update_or_create, get_or_create\n- Verified functionality still works correctly\n\n## Impact\n- Minimal code change (3 lines modified)\n- No breaking changes\n- Improves developer experience with better introspection in IPython, Jupyter, and IDEs\n- Aligns with Python best practices for wrapper functions\nEOF\n\ncat CHANGES_SUMMARY.md\n```",
-    "reward": 0.6
+    "reward": 0.7
   },
   {
     "role": "user",

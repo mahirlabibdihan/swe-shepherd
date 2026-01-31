@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the Django messages storage implementation mentioned in the PR description and previous attempt.\n\n```bash\nfind /testbed -type f -name \"*.py\" | grep -E \"(messages|storage)\" | head -20\n```",
-    "reward": 0.006266480889102335
+    "reward": 0.2556848210041678
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me find the actual Django messages storage implementation in the django.contrib.messages module.\n\n```bash\nfind /testbed -type f -path \"*/django/contrib/messages/*.py\" | head -20\n```",
-    "reward": 0.010444134815170559
+    "reward": 0.2594747016736129
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Based on the PR description and previous attempt, the issue is in `/testbed/django/contrib/messages/storage/base.py` where the `Message.level_tag` property uses a static `LEVEL_TAGS` that doesn't update when `@override_settings` is used. Let me first examine the current implementation.\n\n```bash\ncat /testbed/django/contrib/messages/storage/base.py\n```",
-    "reward": 0.017406891358617598
+    "reward": 0.26579116945602155
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me check the `utils.py` file to see what `get_level_tags()` does:\n\n```bash\ncat /testbed/django/contrib/messages/utils.py\n```",
-    "reward": 0.029011485597696
+    "reward": 0.2763186157600359
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me check the constants to understand the default tags:\n\n```bash\ncat /testbed/django/contrib/messages/constants.py\n```",
-    "reward": 0.04835247599616
+    "reward": 0.29386435960005985
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now I understand the issue. The `LEVEL_TAGS` in `base.py` is computed once at module import time, so when `@override_settings` changes `MESSAGE_TAGS`, the `LEVEL_TAGS` variable doesn't get updated. \n\nAccording to the previous attempt analysis, the solution is to:\n1. Make `Message.level_tag` property dynamically call `utils.get_level_tags()` instead of using the static `LEVEL_TAGS`\n2. Keep the `LEVEL_TAGS` constant for backward compatibility (in case external code references it)\n\nLet me first create a reproduction script to verify the issue exists:\n\n```bash\ncat <<'EOF' > /testbed/test_reproduce_issue.py\n\"\"\"\nReproduction script for the LEVEL_TAGS not updated when using @override_settings issue.\n\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        INSTALLED_APPS=[\n            'django.contrib.messages',\n        ],\n        MESSAGE_STORAGE='django.contrib.messages.storage.base.BaseStorage',\n    )\n\ndjango.setup()\n\nfrom django.test import override_settings\nfrom django.contrib.messages.storage.base import Message\nfrom django.contrib.messages import constants\n\n# Test 1: Default behavior\nprint(\"Test 1: Default behavior\")\nmsg = Message(constants.INFO, \"Test message\")\nprint(f\"  Level: {msg.level}, Level tag: '{msg.level_tag}'\")\nassert msg.level_tag == 'info', f\"Expected 'info', got '{msg.level_tag}'\"\nprint(\"  \u2713 Default level_tag works correctly\")\n\n# Test 2: With @override_settings - this should fail before the fix\nprint(\"\\nTest 2: With @override_settings(MESSAGE_TAGS={50: 'critical'})\")\nwith override_settings(MESSAGE_TAGS={50: 'critical'}):\n    msg_custom = Message(50, \"Critical message\")\n    print(f\"  Level: {msg_custom.level}, Level tag: '{msg_custom.level_tag}'\")\n    \n    if msg_custom.level_tag == '':\n        print(\"  \u2717 BUG CONFIRMED: level_tag is empty string instead of 'critical'\")\n        print(\"  This is the bug we need to fix!\")\n    elif msg_custom.level_tag == 'critical':\n        print(\"  \u2713 level_tag correctly returns 'critical'\")\n        print(\"  Bug is FIXED!\")\n    else:\n        print(f\"  ? Unexpected level_tag: '{msg_custom.level_tag}'\")\n\n# Test 3: Verify standard tags still work inside override\nprint(\"\\nTest 3: Standard tags inside override_settings\")\nwith override_settings(MESSAGE_TAGS={50: 'critical'}):\n    msg_info = Message(constants.INFO, \"Info message\")\n    print(f\"  Level: {msg_info.level}, Level tag: '{msg_info.level_tag}'\")\n    assert msg_info.level_tag == 'info', f\"Expected 'info', got '{msg_info.level_tag}'\"\n    print(\"  \u2713 Standard tags still work\")\n\nprint(\"\\nAll tests completed!\")\nEOF\n```",
-    "reward": 0.08058745999360001
+    "reward": 0.32310726600009976
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script to confirm the issue exists:\n\n```bash\ncd /testbed && python test_reproduce_issue.py\n```",
-    "reward": -0.032354233343999984
+    "reward": 0.20517877666683293
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The bug is confirmed. Now I need to implement the fix. According to the previous attempt analysis and the new plan, I should:\n\n1. Modify the `Message.level_tag` property to dynamically call `utils.get_level_tags()` instead of using the static `LEVEL_TAGS`\n2. Keep the `LEVEL_TAGS` constant for backward compatibility\n\nLet me implement this fix:\n\n```bash\ncat <<'EOF' > /testbed/django/contrib/messages/storage/base.py\nfrom django.conf import settings\nfrom django.contrib.messages import constants, utils\n\n# Keep LEVEL_TAGS for backward compatibility with code that may reference it directly.\n# However, Message.level_tag now dynamically retrieves tags to support @override_settings.\nLEVEL_TAGS = utils.get_level_tags()\n\n\nclass Message:\n    \"\"\"\n    Represent an actual message that can be stored in any of the supported\n    storage classes (typically session- or cookie-based) and rendered in a view\n    or template.\n    \"\"\"\n\n    def __init__(self, level, message, extra_tags=None):\n        self.level = int(level)\n        self.message = message\n        self.extra_tags = extra_tags\n\n    def _prepare(self):\n        \"\"\"\n        Prepare the message for serialization by forcing the ``message``\n        and ``extra_tags`` to str in case they are lazy translations.\n        \"\"\"\n        self.message = str(self.message)\n        self.extra_tags = str(self.extra_tags) if self.extra_tags is not None else None\n\n    def __eq__(self, other):\n        if not isinstance(other, Message):\n            return NotImplemented\n        return self.level == other.level and self.message == other.message\n\n    def __str__(self):\n        return str(self.message)\n\n    @property\n    def tags(self):\n        return ' '.join(tag for tag in [self.extra_tags, self.level_tag] if tag)\n\n    @property\n    def level_tag(self):\n        # Dynamically retrieve level tags to support @override_settings(MESSAGE_TAGS=...)\n        # This ensures that changes to MESSAGE_TAGS are reflected in level_tag.\n        return utils.get_level_tags().get(self.level, '')\n\n\nclass BaseStorage:\n    \"\"\"\n    This is the base backend for temporary message storage.\n\n    This is not a complete class; to be a usable storage backend, it must be\n    subclassed and the two methods ``_get`` and ``_store`` overridden.\n    \"\"\"\n\n    def __init__(self, request, *args, **kwargs):\n        self.request = request\n        self._queued_messages = []\n        self.used = False\n        self.added_new = False\n        super().__init__(*args, **kwargs)\n\n    def __len__(self):\n        return len(self._loaded_messages) + len(self._queued_messages)\n\n    def __iter__(self):\n        self.used = True\n        if self._queued_messages:\n            self._loaded_messages.extend(self._queued_messages)\n            self._queued_messages = []\n        return iter(self._loaded_messages)\n\n    def __contains__(self, item):\n        return item in self._loaded_messages or item in self._queued_messages\n\n    def __repr__(self):\n        return f'<{self.__class__.__qualname__}: request={self.request!r}>'\n\n    @property\n    def _loaded_messages(self):\n        \"\"\"\n        Return a list of loaded messages, retrieving them first if they have\n        not been loaded yet.\n        \"\"\"\n        if not hasattr(self, '_loaded_data'):\n            messages, all_retrieved = self._get()\n            self._loaded_data = messages or []\n        return self._loaded_data\n\n    def _get(self, *args, **kwargs):\n        \"\"\"\n        Retrieve a list of stored messages. Return a tuple of the messages\n        and a flag indicating whether or not all the messages originally\n        intended to be stored in this storage were, in fact, stored and\n        retrieved; e.g., ``(messages, all_retrieved)``.\n\n        **This method must be implemented by a subclass.**\n\n        If it is possible to tell if the backend was not used (as opposed to\n        just containing no messages) then ``None`` should be returned in\n        place of ``messages``.\n        \"\"\"\n        raise NotImplementedError('subclasses of BaseStorage must provide a _get() method')\n\n    def _store(self, messages, response, *args, **kwargs):\n        \"\"\"\n        Store a list of messages and return a list of any messages which could\n        not be stored.\n\n        One type of object must be able to be stored, ``Message``.\n\n        **This method must be implemented by a subclass.**\n        \"\"\"\n        raise NotImplementedError('subclasses of BaseStorage must provide a _store() method')\n\n    def _prepare_messages(self, messages):\n        \"\"\"\n        Prepare a list of messages for storage.\n        \"\"\"\n        for message in messages:\n            message._prepare()\n\n    def update(self, response):\n        \"\"\"\n        Store all unread messages.\n\n        If the backend has yet to be iterated, store previously stored messages\n        again. Otherwise, only store messages added after the last iteration.\n        \"\"\"\n        self._prepare_messages(self._queued_messages)\n        if self.used:\n            return self._store(self._queued_messages, response)\n        elif self.added_new:\n            messages = self._loaded_messages + self._queued_messages\n            return self._store(messages, response)\n\n    def add(self, level, message, extra_tags=''):\n        \"\"\"\n        Queue a message to be stored.\n\n        The message is only queued if it contained something and its level is\n        not less than the recording level (``self.level``).\n        \"\"\"\n        if not message:\n            return\n        # Check that the message level is not less than the recording level.\n        level = int(level)\n        if level < self.level:\n            return\n        # Add the message.\n        self.added_new = True\n        message = Message(level, message, extra_tags=extra_tags)\n        self._queued_messages.append(message)\n\n    def _get_level(self):\n        \"\"\"\n        Return the minimum recorded level.\n\n        The default level is the ``MESSAGE_LEVEL`` setting. If this is\n        not found, the ``INFO`` level is used.\n        \"\"\"\n        if not hasattr(self, '_level'):\n            self._level = getattr(settings, 'MESSAGE_LEVEL', constants.INFO)\n        return self._level\n\n    def _set_level(self, value=None):\n        \"\"\"\n        Set a custom minimum recorded level.\n\n        If set to ``None``, the default level will be used (see the\n        ``_get_level`` method).\n        \"\"\"\n        if value is None and hasattr(self, '_level'):\n            del self._level\n        else:\n            self._level = int(value)\n\n    level = property(_get_level, _set_level, _set_level)\nEOF\n```",
-    "reward": -0.05392372223999998
+    "reward": 0.17529796111138818
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script again to verify the fix works:\n\n```bash\ncd /testbed && python test_reproduce_issue.py\n```",
-    "reward": -0.08987287039999997
+    "reward": 0.1254966018523136
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works. Now let me create a more comprehensive test to verify edge cases and ensure the fix is robust:\n\n```bash\ncat <<'EOF' > /testbed/test_comprehensive.py\n\"\"\"\nComprehensive test for the LEVEL_TAGS fix with @override_settings.\n\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        INSTALLED_APPS=[\n            'django.contrib.messages',\n        ],\n        MESSAGE_STORAGE='django.contrib.messages.storage.base.BaseStorage',\n    )\n\ndjango.setup()\n\nfrom django.test import override_settings\nfrom django.contrib.messages.storage.base import Message, LEVEL_TAGS\nfrom django.contrib.messages import constants\n\nprint(\"=\" * 70)\nprint(\"COMPREHENSIVE TESTS FOR LEVEL_TAGS FIX\")\nprint(\"=\" * 70)\n\n# Test 1: Default tags work correctly\nprint(\"\\n1. Testing default tags...\")\nfor level, expected_tag in constants.DEFAULT_TAGS.items():\n    msg = Message(level, f\"Test message for level {level}\")\n    assert msg.level_tag == expected_tag, f\"Expected '{expected_tag}', got '{msg.level_tag}'\"\n    print(f\"   \u2713 Level {level} -> '{msg.level_tag}'\")\n\n# Test 2: Custom tags with override_settings\nprint(\"\\n2. Testing custom tags with @override_settings...\")\nwith override_settings(MESSAGE_TAGS={50: 'critical', 60: 'emergency'}):\n    msg_critical = Message(50, \"Critical message\")\n    msg_emergency = Message(60, \"Emergency message\")\n    assert msg_critical.level_tag == 'critical', f\"Expected 'critical', got '{msg_critical.level_tag}'\"\n    assert msg_emergency.level_tag == 'emergency', f\"Expected 'emergency', got '{msg_emergency.level_tag}'\"\n    print(f\"   \u2713 Level 50 -> '{msg_critical.level_tag}'\")\n    print(f\"   \u2713 Level 60 -> '{msg_emergency.level_tag}'\")\n\n# Test 3: Overriding existing tags\nprint(\"\\n3. Testing overriding existing tags...\")\nwith override_settings(MESSAGE_TAGS={constants.INFO: 'information'}):\n    msg = Message(constants.INFO, \"Info message\")\n    assert msg.level_tag == 'information', f\"Expected 'information', got '{msg.level_tag}'\"\n    print(f\"   \u2713 Level {constants.INFO} (INFO) -> '{msg.level_tag}'\")\n\n# Test 4: Nested override_settings\nprint(\"\\n4. Testing nested @override_settings...\")\nwith override_settings(MESSAGE_TAGS={50: 'critical'}):\n    msg1 = Message(50, \"Message 1\")\n    assert msg1.level_tag == 'critical', f\"Expected 'critical', got '{msg1.level_tag}'\"\n    print(f\"   \u2713 Outer context: Level 50 -> '{msg1.level_tag}'\")\n    \n    with override_settings(MESSAGE_TAGS={50: 'super-critical', 60: 'emergency'}):\n        msg2 = Message(50, \"Message 2\")\n        msg3 = Message(60, \"Message 3\")\n        assert msg2.level_tag == 'super-critical', f\"Expected 'super-critical', got '{msg2.level_tag}'\"\n        assert msg3.level_tag == 'emergency', f\"Expected 'emergency', got '{msg3.level_tag}'\"\n        print(f\"   \u2713 Inner context: Level 50 -> '{msg2.level_tag}'\")\n        print(f\"   \u2713 Inner context: Level 60 -> '{msg3.level_tag}'\")\n    \n    # Back to outer context\n    msg4 = Message(50, \"Message 4\")\n    assert msg4.level_tag == 'critical', f\"Expected 'critical', got '{msg4.level_tag}'\"\n    print(f\"   \u2713 Back to outer context: Level 50 -> '{msg4.level_tag}'\")\n\n# Test 5: Empty string for unknown levels\nprint(\"\\n5. Testing unknown levels return empty string...\")\nmsg = Message(999, \"Unknown level message\")\nassert msg.level_tag == '', f\"Expected empty string, got '{msg.level_tag}'\"\nprint(f\"   \u2713 Level 999 (unknown) -> '{msg.level_tag}' (empty string)\")\n\n# Test 6: Tags property integration\nprint(\"\\n6. Testing tags property integration...\")\nmsg = Message(constants.INFO, \"Test\", extra_tags=\"custom\")\nassert msg.tags == 'custom info', f\"Expected 'custom info', got '{msg.tags}'\"\nprint(f\"   \u2713 Message with extra_tags='custom' -> tags='{msg.tags}'\")\n\nwith override_settings(MESSAGE_TAGS={constants.INFO: 'information'}):\n    msg = Message(constants.INFO, \"Test\", extra_tags=\"custom\")\n    assert msg.tags == 'custom information', f\"Expected 'custom information', got '{msg.tags}'\"\n    print(f\"   \u2713 With override, extra_tags='custom' -> tags='{msg.tags}'\")\n\n# Test 7: LEVEL_TAGS constant still exists for backward compatibility\nprint(\"\\n7. Testing LEVEL_TAGS constant exists for backward compatibility...\")\nassert LEVEL_TAGS is not None, \"LEVEL_TAGS should still exist\"\nassert isinstance(LEVEL_TAGS, dict), \"LEVEL_TAGS should be a dict\"\nprint(f\"   \u2713 LEVEL_TAGS exists and is a dict with {len(LEVEL_TAGS)} entries\")\n\n# Test 8: Empty MESSAGE_TAGS override\nprint(\"\\n8. Testing empty MESSAGE_TAGS override...\")\nwith override_settings(MESSAGE_TAGS={}):\n    # Default tags should still work\n    msg = Message(constants.INFO, \"Test\")\n    assert msg.level_tag == 'info', f\"Expected 'info', got '{msg.level_tag}'\"\n    print(f\"   \u2713 With empty MESSAGE_TAGS, default tags still work: '{msg.level_tag}'\")\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"ALL TESTS PASSED! \u2713\")\nprint(\"=\" * 70)\nEOF\n```",
-    "reward": -0.06645478399999996
+    "reward": 0.125827669753856
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the comprehensive test to ensure all edge cases work correctly:\n\n```bash\ncd /testbed && python test_comprehensive.py\n```",
-    "reward": -0.27742463999999994
+    "reward": -0.12362055041024
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me run the Django messages test suite to ensure we haven't broken anything:\n\n```bash\ncd /testbed && python -m pytest tests/messages_tests/ -xvs\n```",
-    "reward": -0.46237439999999996
+    "reward": -0.3727009173504
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try using Django's test runner instead:\n\n```bash\ncd /testbed && python -m django test messages_tests --settings=tests.test_sqlite\n```",
-    "reward": -0.270624
+    "reward": -0.121168195584
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try a different approach to run the tests:\n\n```bash\ncd /testbed && python tests/runtests.py messages_tests --verbosity=2\n```",
-    "reward": 0.048960000000000004
+    "reward": 0.29805300736
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All 96 tests in the messages_tests suite pass. Now let me verify the fix one more time by looking at what we changed:\n\n```bash\ncd /testbed && git diff django/contrib/messages/storage/base.py\n```",
-    "reward": 0.0816
+    "reward": 0.3300883456
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The changes are minimal and focused. Let me create one final test to demonstrate the fix works in a real-world scenario with Django's test framework:\n\n```bash\ncat <<'EOF' > /testbed/test_final_verification.py\n\"\"\"\nFinal verification test demonstrating the fix for LEVEL_TAGS with @override_settings.\nThis test simulates a real-world Django test scenario.\n\"\"\"\nimport os\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        INSTALLED_APPS=[\n            'django.contrib.messages',\n            'django.contrib.sessions',\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        MIDDLEWARE=[\n            'django.contrib.sessions.middleware.SessionMiddleware',\n            'django.contrib.messages.middleware.MessageMiddleware',\n        ],\n        MESSAGE_STORAGE='django.contrib.messages.storage.session.SessionStorage',\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n    )\n\ndjango.setup()\n\nfrom django.test import TestCase, override_settings\nfrom django.contrib.messages import constants\nfrom django.contrib.messages.storage.base import Message\n\nclass MessageLevelTagTests(TestCase):\n    \"\"\"Test that Message.level_tag respects @override_settings.\"\"\"\n    \n    def test_default_level_tags(self):\n        \"\"\"Test that default level tags work correctly.\"\"\"\n        msg = Message(constants.INFO, \"Test message\")\n        self.assertEqual(msg.level_tag, 'info')\n        \n        msg = Message(constants.ERROR, \"Error message\")\n        self.assertEqual(msg.level_tag, 'error')\n    \n    @override_settings(MESSAGE_TAGS={50: 'critical'})\n    def test_custom_level_tag_with_override_settings(self):\n        \"\"\"Test that custom level tags work with @override_settings.\"\"\"\n        msg = Message(50, \"Critical message\")\n        self.assertEqual(msg.level_tag, 'critical')\n        \n        # Standard tags should still work\n        msg_info = Message(constants.INFO, \"Info message\")\n        self.assertEqual(msg_info.level_tag, 'info')\n    \n    @override_settings(MESSAGE_TAGS={constants.INFO: 'information'})\n    def test_override_existing_tag(self):\n        \"\"\"Test that we can override existing default tags.\"\"\"\n        msg = Message(constants.INFO, \"Info message\")\n        self.assertEqual(msg.level_tag, 'information')\n    \n    def test_nested_override_settings(self):\n        \"\"\"Test that nested @override_settings work correctly.\"\"\"\n        # Outside any override\n        msg = Message(50, \"Message\")\n        self.assertEqual(msg.level_tag, '')  # Unknown level\n        \n        with override_settings(MESSAGE_TAGS={50: 'critical'}):\n            msg = Message(50, \"Message\")\n            self.assertEqual(msg.level_tag, 'critical')\n            \n            with override_settings(MESSAGE_TAGS={50: 'super-critical'}):\n                msg = Message(50, \"Message\")\n                self.assertEqual(msg.level_tag, 'super-critical')\n            \n            # Back to outer override\n            msg = Message(50, \"Message\")\n            self.assertEqual(msg.level_tag, 'critical')\n        \n        # Back to no override\n        msg = Message(50, \"Message\")\n        self.assertEqual(msg.level_tag, '')\n    \n    def test_tags_property_with_override(self):\n        \"\"\"Test that the tags property works correctly with overrides.\"\"\"\n        msg = Message(constants.INFO, \"Test\", extra_tags=\"custom\")\n        self.assertEqual(msg.tags, 'custom info')\n        \n        with override_settings(MESSAGE_TAGS={constants.INFO: 'information'}):\n            msg = Message(constants.INFO, \"Test\", extra_tags=\"custom\")\n            self.assertEqual(msg.tags, 'custom information')\n\n# Run the tests\nif __name__ == '__main__':\n    import unittest\n    \n    print(\"=\" * 70)\n    print(\"RUNNING FINAL VERIFICATION TESTS\")\n    print(\"=\" * 70)\n    \n    suite = unittest.TestLoader().loadTestsFromTestCase(MessageLevelTagTests)\n    runner = unittest.TextTestRunner(verbosity=2)\n    result = runner.run(suite)\n    \n    print(\"\\n\" + \"=\" * 70)\n    if result.wasSuccessful():\n        print(\"ALL TESTS PASSED! \u2713\")\n        print(\"The fix for LEVEL_TAGS with @override_settings is working correctly.\")\n    else:\n        print(\"SOME TESTS FAILED!\")\n    print(\"=\" * 70)\nEOF\n```",
-    "reward": 0.136
+    "reward": 0.383480576
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the final verification test:\n\n```bash\ncd /testbed && python test_final_verification.py\n```",
-    "reward": 0.06
+    "reward": 0.30580096
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me verify that the LEVEL_TAGS constant is still accessible for backward compatibility:\n\n```bash\ncat <<'EOF' > /testbed/test_backward_compat.py\n\"\"\"\nTest backward compatibility - ensure LEVEL_TAGS constant still exists.\n\"\"\"\nimport os\nimport django\n\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        INSTALLED_APPS=['django.contrib.messages'],\n    )\n\ndjango.setup()\n\nfrom django.contrib.messages.storage.base import LEVEL_TAGS\nfrom django.contrib.messages import constants\n\nprint(\"Testing backward compatibility...\")\nprint(f\"LEVEL_TAGS type: {type(LEVEL_TAGS)}\")\nprint(f\"LEVEL_TAGS content: {LEVEL_TAGS}\")\n\n# Verify it contains the default tags\nassert isinstance(LEVEL_TAGS, dict), \"LEVEL_TAGS should be a dict\"\nassert LEVEL_TAGS[constants.INFO] == 'info', \"LEVEL_TAGS should contain default tags\"\nassert LEVEL_TAGS[constants.ERROR] == 'error', \"LEVEL_TAGS should contain default tags\"\n\nprint(\"\\n\u2713 LEVEL_TAGS constant exists and contains default tags\")\nprint(\"\u2713 Backward compatibility maintained!\")\nEOF\n```",
-    "reward": 0.1
+    "reward": 0.3430016
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the backward compatibility test:\n\n```bash\ncd /testbed && python test_backward_compat.py\n```",
-    "reward": 0.0
+    "reward": 0.23833600000000002
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now let me create a summary document explaining the changes and verify the implementation one more time:\n\n```bash\ncat <<'EOF' > /testbed/IMPLEMENTATION_SUMMARY.md\n# Fix for LEVEL_TAGS not updated when using @override_settings\n\n## Problem\nWhen reading messages inside tests, new message tags created using `@override_settings(MESSAGE_TAGS=...)` were not being reflected in the `Message.level_tag` property. This caused the property to return an empty string for custom tags instead of the expected tag value.\n\n## Root Cause\nThe `LEVEL_TAGS` constant in `django/contrib/messages/storage/base.py` was computed once at module import time by calling `utils.get_level_tags()`. This meant it captured the settings at import time and never updated when `@override_settings` changed the `MESSAGE_TAGS` setting during tests.\n\n## Solution\nModified the `Message.level_tag` property to dynamically retrieve level tags by calling `utils.get_level_tags()` on each access, instead of using the static `LEVEL_TAGS` dictionary. This ensures that any changes to `MESSAGE_TAGS` via `@override_settings` are immediately reflected.\n\n## Changes Made\nFile: `django/contrib/messages/storage/base.py`\n\n1. **Kept `LEVEL_TAGS` constant for backward compatibility**: The module-level `LEVEL_TAGS` constant is retained so that any external code that directly references it will continue to work.\n\n2. **Modified `Message.level_tag` property**: Changed from:\n   ```python\n   @property\n   def level_tag(self):\n       return LEVEL_TAGS.get(self.level, '')\n   ```\n   \n   To:\n   ```python\n   @property\n   def level_tag(self):\n       # Dynamically retrieve level tags to support @override_settings(MESSAGE_TAGS=...)\n       # This ensures that changes to MESSAGE_TAGS are reflected in level_tag.\n       return utils.get_level_tags().get(self.level, '')\n   ```\n\n3. **Added explanatory comments**: Added comments explaining why `LEVEL_TAGS` is kept and why `level_tag` now dynamically retrieves tags.\n\n## Testing\n- All 96 existing Django messages tests pass\n- Created comprehensive tests verifying:\n  - Default tags work correctly\n  - Custom tags with `@override_settings` work\n  - Overriding existing tags works\n  - Nested `@override_settings` work correctly\n  - The `tags` property integrates correctly\n  - Backward compatibility is maintained (LEVEL_TAGS constant still exists)\n  - Unknown levels return empty string as expected\n\n## Performance Considerations\nThe dynamic approach calls `utils.get_level_tags()` on every `level_tag` access, which performs a dictionary merge of `DEFAULT_TAGS` and `MESSAGE_TAGS`. This is a minimal overhead for typical use cases, and the correctness benefit (supporting `@override_settings`) outweighs the small performance cost.\n\nAn alternative optimization would be to use Django's `setting_changed` signal to update `LEVEL_TAGS` when `MESSAGE_TAGS` changes, but the current solution is simpler and more maintainable while still being performant enough for real-world usage.\n\n## Backward Compatibility\nThe `LEVEL_TAGS` module-level constant is retained, ensuring that any code that directly references it (e.g., `from django.contrib.messages.storage.base import LEVEL_TAGS`) will continue to work without modification.\nEOF\n```",
-    "reward": 0.0
+    "reward": 0.23056000000000001
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me view the implementation summary to confirm it's correct:\n\n```bash\ncat /testbed/IMPLEMENTATION_SUMMARY.md\n```",
-    "reward": 0.0
+    "reward": 0.21760000000000002
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Let me do a final check to ensure the fix is correct by viewing the modified file one more time:\n\n```bash\ncat /testbed/django/contrib/messages/storage/base.py | head -45\n```",
-    "reward": 0.0
+    "reward": 0.196
   },
   {
     "role": "user",
@@ -326,7 +326,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The implementation is complete and correct. Let me run one final comprehensive test to ensure everything works as expected:\n\n```bash\ncd /testbed && python test_reproduce_issue.py && echo \"---\" && python test_comprehensive.py 2>&1 | tail -20\n```",
-    "reward": 0.0
+    "reward": 0.16
   },
   {
     "role": "user",
@@ -343,7 +343,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me submit the final implementation. The fix is complete, tested, and ready for submission.\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 0.1
   },
   {
     "role": "user",

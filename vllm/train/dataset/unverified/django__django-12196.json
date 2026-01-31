@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by understanding the structure of the repository and locating the relevant files mentioned in the PR description. I need to find the `sensitive_variables` and `sensitive_post_parameters` decorators in the Django codebase.\n\n```bash\nfind /testbed -type f -name \"*.py\" | grep -E \"(debug|decorator)\" | head -20\n```",
-    "reward": 0.18154739606565481
+    "reward": 0.4961733957221296
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! I found `/testbed/django/views/decorators/debug.py` which is likely where the `sensitive_variables` and `sensitive_post_parameters` decorators are located. Let me examine this file to understand the current implementation.\n\n```bash\ncat /testbed/django/views/decorators/debug.py\n```",
-    "reward": 0.302578993442758
+    "reward": 0.660288992870216
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see the current implementation of both decorators. Now let me create a script to reproduce the issue described in the PR - where using `@sensitive_variables` without parentheses causes unexpected behavior.\n\n```bash\ncat <<'EOF' > /testbed/test_reproduce_issue.py\n\"\"\"Script to reproduce the issue with incorrect decorator usage\"\"\"\n\n# Test 1: Incorrect usage (missing parentheses)\nprint(\"=\" * 60)\nprint(\"Test 1: Incorrect usage - @sensitive_variables (no parentheses)\")\nprint(\"=\" * 60)\n\nfrom django.views.decorators.debug import sensitive_variables\n\n@sensitive_variables  # incorrect usage, should be @sensitive_variables()\ndef is_password_ok(password):\n    return len(password) > 8\n\n# This should return False but will return True because is_password_ok\n# is now a decorator function, not the original function\nresult = bool(is_password_ok('asdf'))\nprint(f\"bool(is_password_ok('asdf')) = {result}\")\nprint(f\"Expected: False (because len('asdf') = 4 < 8)\")\nprint(f\"Actual: {result}\")\nprint(f\"Type of is_password_ok: {type(is_password_ok)}\")\nprint()\n\n# Test 2: Correct usage (with parentheses)\nprint(\"=\" * 60)\nprint(\"Test 2: Correct usage - @sensitive_variables()\")\nprint(\"=\" * 60)\n\n@sensitive_variables()\ndef is_password_ok_correct(password):\n    return len(password) > 8\n\nresult_correct = bool(is_password_ok_correct('asdf'))\nprint(f\"bool(is_password_ok_correct('asdf')) = {result_correct}\")\nprint(f\"Expected: False\")\nprint(f\"Actual: {result_correct}\")\nprint(f\"Type of is_password_ok_correct: {type(is_password_ok_correct)}\")\nprint()\n\n# Test 3: Incorrect usage with sensitive_post_parameters\nprint(\"=\" * 60)\nprint(\"Test 3: Incorrect usage - @sensitive_post_parameters (no parentheses)\")\nprint(\"=\" * 60)\n\nfrom django.views.decorators.debug import sensitive_post_parameters\n\n@sensitive_post_parameters  # incorrect usage\ndef my_view(request):\n    return \"Hello\"\n\nprint(f\"Type of my_view: {type(my_view)}\")\nprint(f\"Is callable: {callable(my_view)}\")\nprint()\nEOF\n```",
-    "reward": 0.2542983224045967
+    "reward": 0.6004816547836933
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this script to confirm the issue exists:\n\n```bash\ncd /testbed && python test_reproduce_issue.py\n```",
-    "reward": 0.2571638706743279
+    "reward": 0.6674694246394888
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I've confirmed the issue. When using `@sensitive_variables` without parentheses, the function becomes a decorator function instead of the wrapped function, leading to unexpected behavior (returning True when it should return False).\n\nNow I need to implement the safeguard as described in the PR. The solution is to check if exactly one argument is provided and it's callable, which would indicate incorrect usage. Let me modify the `debug.py` file to add this safeguard to both decorators.\n\n```bash\ncat <<'EOF' > /testbed/django/views/decorators/debug.py\nimport functools\n\nfrom django.http import HttpRequest\n\n\ndef sensitive_variables(*variables):\n    \"\"\"\n    Indicate which variables used in the decorated function are sensitive so\n    that those variables can later be treated in a special way, for example\n    by hiding them when logging unhandled exceptions.\n\n    Accept two forms:\n\n    * with specified variable names:\n\n        @sensitive_variables('user', 'password', 'credit_card')\n        def my_function(user):\n            password = user.pass_word\n            credit_card = user.credit_card_number\n            ...\n\n    * without any specified variable names, in which case consider all\n      variables are sensitive:\n\n        @sensitive_variables()\n        def my_function()\n            ...\n    \"\"\"\n    if len(variables) == 1 and callable(variables[0]):\n        raise TypeError(\n            'sensitive_variables() must be called to use it as a decorator, '\n            'e.g., use @sensitive_variables(), not @sensitive_variables.'\n        )\n    \n    def decorator(func):\n        @functools.wraps(func)\n        def sensitive_variables_wrapper(*func_args, **func_kwargs):\n            if variables:\n                sensitive_variables_wrapper.sensitive_variables = variables\n            else:\n                sensitive_variables_wrapper.sensitive_variables = '__ALL__'\n            return func(*func_args, **func_kwargs)\n        return sensitive_variables_wrapper\n    return decorator\n\n\ndef sensitive_post_parameters(*parameters):\n    \"\"\"\n    Indicate which POST parameters used in the decorated view are sensitive,\n    so that those parameters can later be treated in a special way, for example\n    by hiding them when logging unhandled exceptions.\n\n    Accept two forms:\n\n    * with specified parameters:\n\n        @sensitive_post_parameters('password', 'credit_card')\n        def my_view(request):\n            pw = request.POST['password']\n            cc = request.POST['credit_card']\n            ...\n\n    * without any specified parameters, in which case consider all\n      variables are sensitive:\n\n        @sensitive_post_parameters()\n        def my_view(request)\n            ...\n    \"\"\"\n    if len(parameters) == 1 and callable(parameters[0]):\n        raise TypeError(\n            'sensitive_post_parameters() must be called to use it as a decorator, '\n            'e.g., use @sensitive_post_parameters(), not @sensitive_post_parameters.'\n        )\n    \n    def decorator(view):\n        @functools.wraps(view)\n        def sensitive_post_parameters_wrapper(request, *args, **kwargs):\n            assert isinstance(request, HttpRequest), (\n                \"sensitive_post_parameters didn't receive an HttpRequest. \"\n                \"If you are decorating a classmethod, be sure to use \"\n                \"@method_decorator.\"\n            )\n            if parameters:\n                request.sensitive_post_parameters = parameters\n            else:\n                request.sensitive_post_parameters = '__ALL__'\n            return view(request, *args, **kwargs)\n        return sensitive_post_parameters_wrapper\n    return decorator\nEOF\n```",
-    "reward": 0.42860645112387985
+    "reward": 0.945782374399148
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! I've added the safeguards to both decorators. Now let me create a comprehensive test script to verify that:\n1. Incorrect usage (without parentheses) now raises a TypeError\n2. Correct usage (with parentheses, no args) still works\n3. Correct usage (with string arguments) still works\n4. The error message is clear and helpful\n\n```bash\ncat <<'EOF' > /testbed/test_fix_verification.py\n\"\"\"Script to verify the fix for incorrect decorator usage\"\"\"\nimport sys\n\nprint(\"=\" * 70)\nprint(\"Test 1: Incorrect usage should raise TypeError at import time\")\nprint(\"=\" * 70)\n\ntry:\n    from django.views.decorators.debug import sensitive_variables\n    \n    @sensitive_variables  # incorrect usage, should raise TypeError\n    def is_password_ok(password):\n        return len(password) > 8\n    \n    print(\"ERROR: No exception was raised!\")\n    sys.exit(1)\nexcept TypeError as e:\n    print(f\"\u2713 TypeError raised as expected: {e}\")\n    print()\n\nprint(\"=\" * 70)\nprint(\"Test 2: Correct usage with no arguments should work\")\nprint(\"=\" * 70)\n\nfrom django.views.decorators.debug import sensitive_variables\n\n@sensitive_variables()\ndef check_password_length(password):\n    return len(password) > 8\n\nresult = check_password_length('asdf')\nprint(f\"check_password_length('asdf') = {result}\")\nprint(f\"Expected: False\")\nassert result == False, \"Function should return False\"\nprint(\"\u2713 Correct usage with no arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 3: Correct usage with string arguments should work\")\nprint(\"=\" * 70)\n\n@sensitive_variables('password', 'secret')\ndef process_credentials(password, secret):\n    return len(password) + len(secret)\n\nresult = process_credentials('pass', 'sec')\nprint(f\"process_credentials('pass', 'sec') = {result}\")\nprint(f\"Expected: 7\")\nassert result == 7, \"Function should return 7\"\nprint(\"\u2713 Correct usage with string arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 4: Incorrect usage of sensitive_post_parameters\")\nprint(\"=\" * 70)\n\ntry:\n    from django.views.decorators.debug import sensitive_post_parameters\n    \n    @sensitive_post_parameters  # incorrect usage\n    def my_view(request):\n        return \"Hello\"\n    \n    print(\"ERROR: No exception was raised!\")\n    sys.exit(1)\nexcept TypeError as e:\n    print(f\"\u2713 TypeError raised as expected: {e}\")\n    print()\n\nprint(\"=\" * 70)\nprint(\"Test 5: Correct usage of sensitive_post_parameters with no args\")\nprint(\"=\" * 70)\n\nfrom django.views.decorators.debug import sensitive_post_parameters\nfrom django.http import HttpRequest\n\n@sensitive_post_parameters()\ndef my_view_correct(request):\n    return \"Hello\"\n\n# Create a mock request\nrequest = HttpRequest()\nresult = my_view_correct(request)\nprint(f\"my_view_correct(request) = {result}\")\nprint(f\"Expected: 'Hello'\")\nassert result == \"Hello\", \"Function should return 'Hello'\"\nprint(\"\u2713 Correct usage with no arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 6: Correct usage of sensitive_post_parameters with args\")\nprint(\"=\" * 70)\n\n@sensitive_post_parameters('password', 'credit_card')\ndef my_view_with_params(request):\n    return \"Processed\"\n\nresult = my_view_with_params(request)\nprint(f\"my_view_with_params(request) = {result}\")\nprint(f\"Expected: 'Processed'\")\nassert result == \"Processed\", \"Function should return 'Processed'\"\nprint(\"\u2713 Correct usage with string arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"ALL TESTS PASSED!\")\nprint(\"=\" * 70)\nEOF\n```",
-    "reward": 0.46434408520646653
+    "reward": 0.9096372906652468
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the verification script to ensure the fix works correctly:\n\n```bash\ncd /testbed && python test_fix_verification.py\n```",
-    "reward": 0.6072401420107776
+    "reward": 1.1827288177754112
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The fix is working! The TypeError is being raised as expected. The issue is just with the Unicode checkmark character in my test script. Let me fix the test script to avoid Unicode issues:\n\n```bash\ncat <<'EOF' > /testbed/test_fix_verification.py\n\"\"\"Script to verify the fix for incorrect decorator usage\"\"\"\nimport sys\n\nprint(\"=\" * 70)\nprint(\"Test 1: Incorrect usage should raise TypeError at import time\")\nprint(\"=\" * 70)\n\ntry:\n    from django.views.decorators.debug import sensitive_variables\n    \n    @sensitive_variables  # incorrect usage, should raise TypeError\n    def is_password_ok(password):\n        return len(password) > 8\n    \n    print(\"ERROR: No exception was raised!\")\n    sys.exit(1)\nexcept TypeError as e:\n    print(f\"[PASS] TypeError raised as expected: {e}\")\n    print()\n\nprint(\"=\" * 70)\nprint(\"Test 2: Correct usage with no arguments should work\")\nprint(\"=\" * 70)\n\nfrom django.views.decorators.debug import sensitive_variables\n\n@sensitive_variables()\ndef check_password_length(password):\n    return len(password) > 8\n\nresult = check_password_length('asdf')\nprint(f\"check_password_length('asdf') = {result}\")\nprint(f\"Expected: False\")\nassert result == False, \"Function should return False\"\nprint(\"[PASS] Correct usage with no arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 3: Correct usage with string arguments should work\")\nprint(\"=\" * 70)\n\n@sensitive_variables('password', 'secret')\ndef process_credentials(password, secret):\n    return len(password) + len(secret)\n\nresult = process_credentials('pass', 'sec')\nprint(f\"process_credentials('pass', 'sec') = {result}\")\nprint(f\"Expected: 7\")\nassert result == 7, \"Function should return 7\"\nprint(\"[PASS] Correct usage with string arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 4: Incorrect usage of sensitive_post_parameters\")\nprint(\"=\" * 70)\n\ntry:\n    from django.views.decorators.debug import sensitive_post_parameters\n    \n    @sensitive_post_parameters  # incorrect usage\n    def my_view(request):\n        return \"Hello\"\n    \n    print(\"ERROR: No exception was raised!\")\n    sys.exit(1)\nexcept TypeError as e:\n    print(f\"[PASS] TypeError raised as expected: {e}\")\n    print()\n\nprint(\"=\" * 70)\nprint(\"Test 5: Correct usage of sensitive_post_parameters with no args\")\nprint(\"=\" * 70)\n\nfrom django.views.decorators.debug import sensitive_post_parameters\nfrom django.http import HttpRequest\n\n@sensitive_post_parameters()\ndef my_view_correct(request):\n    return \"Hello\"\n\n# Create a mock request\nrequest = HttpRequest()\nresult = my_view_correct(request)\nprint(f\"my_view_correct(request) = {result}\")\nprint(f\"Expected: 'Hello'\")\nassert result == \"Hello\", \"Function should return 'Hello'\"\nprint(\"[PASS] Correct usage with no arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 6: Correct usage of sensitive_post_parameters with args\")\nprint(\"=\" * 70)\n\n@sensitive_post_parameters('password', 'credit_card')\ndef my_view_with_params(request):\n    return \"Processed\"\n\nresult = my_view_with_params(request)\nprint(f\"my_view_with_params(request) = {result}\")\nprint(f\"Expected: 'Processed'\")\nassert result == \"Processed\", \"Function should return 'Processed'\"\nprint(\"[PASS] Correct usage with string arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"ALL TESTS PASSED!\")\nprint(\"=\" * 70)\nEOF\n```",
-    "reward": 0.26206690335129595
+    "reward": 0.7212146962923519
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the updated test script:\n\n```bash\ncd /testbed && python test_fix_verification.py\n```",
-    "reward": 0.43677817225216
+    "reward": 1.0353578271539199
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good progress! Tests 1-4 passed. Test 5 failed because Django settings need to be configured before creating an HttpRequest. Let me update the test script to configure Django settings:\n\n```bash\ncat <<'EOF' > /testbed/test_fix_verification.py\n\"\"\"Script to verify the fix for incorrect decorator usage\"\"\"\nimport sys\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n    )\n    django.setup()\n\nprint(\"=\" * 70)\nprint(\"Test 1: Incorrect usage should raise TypeError at import time\")\nprint(\"=\" * 70)\n\ntry:\n    from django.views.decorators.debug import sensitive_variables\n    \n    @sensitive_variables  # incorrect usage, should raise TypeError\n    def is_password_ok(password):\n        return len(password) > 8\n    \n    print(\"ERROR: No exception was raised!\")\n    sys.exit(1)\nexcept TypeError as e:\n    print(f\"[PASS] TypeError raised as expected: {e}\")\n    print()\n\nprint(\"=\" * 70)\nprint(\"Test 2: Correct usage with no arguments should work\")\nprint(\"=\" * 70)\n\nfrom django.views.decorators.debug import sensitive_variables\n\n@sensitive_variables()\ndef check_password_length(password):\n    return len(password) > 8\n\nresult = check_password_length('asdf')\nprint(f\"check_password_length('asdf') = {result}\")\nprint(f\"Expected: False\")\nassert result == False, \"Function should return False\"\nprint(\"[PASS] Correct usage with no arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 3: Correct usage with string arguments should work\")\nprint(\"=\" * 70)\n\n@sensitive_variables('password', 'secret')\ndef process_credentials(password, secret):\n    return len(password) + len(secret)\n\nresult = process_credentials('pass', 'sec')\nprint(f\"process_credentials('pass', 'sec') = {result}\")\nprint(f\"Expected: 7\")\nassert result == 7, \"Function should return 7\"\nprint(\"[PASS] Correct usage with string arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 4: Incorrect usage of sensitive_post_parameters\")\nprint(\"=\" * 70)\n\ntry:\n    from django.views.decorators.debug import sensitive_post_parameters\n    \n    @sensitive_post_parameters  # incorrect usage\n    def my_view(request):\n        return \"Hello\"\n    \n    print(\"ERROR: No exception was raised!\")\n    sys.exit(1)\nexcept TypeError as e:\n    print(f\"[PASS] TypeError raised as expected: {e}\")\n    print()\n\nprint(\"=\" * 70)\nprint(\"Test 5: Correct usage of sensitive_post_parameters with no args\")\nprint(\"=\" * 70)\n\nfrom django.views.decorators.debug import sensitive_post_parameters\nfrom django.http import HttpRequest\n\n@sensitive_post_parameters()\ndef my_view_correct(request):\n    return \"Hello\"\n\n# Create a mock request\nrequest = HttpRequest()\nresult = my_view_correct(request)\nprint(f\"my_view_correct(request) = {result}\")\nprint(f\"Expected: 'Hello'\")\nassert result == \"Hello\", \"Function should return 'Hello'\"\nprint(\"[PASS] Correct usage with no arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Test 6: Correct usage of sensitive_post_parameters with args\")\nprint(\"=\" * 70)\n\n@sensitive_post_parameters('password', 'credit_card')\ndef my_view_with_params(request):\n    return \"Processed\"\n\nresult = my_view_with_params(request)\nprint(f\"my_view_with_params(request) = {result}\")\nprint(f\"Expected: 'Processed'\")\nassert result == \"Processed\", \"Function should return 'Processed'\"\nprint(\"[PASS] Correct usage with string arguments works!\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"ALL TESTS PASSED!\")\nprint(\"=\" * 70)\nEOF\n```",
-    "reward": 0.3112969537536
+    "reward": 0.8089297119231998
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the updated test script with Django settings configured:\n\n```bash\ncd /testbed && python test_fix_verification.py\n```",
-    "reward": 0.518828256256
+    "reward": 1.1815495198719999
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me run the original reproduction script to confirm that the issue is fixed:\n\n```bash\ncd /testbed && python test_reproduce_issue.py\n```",
-    "reward": 0.44804709375999996
+    "reward": 1.0525825331199998
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix is working correctly - the incorrect usage now raises a TypeError at import time, preventing the subtle bug described in the PR. Now let me run the existing Django test suite to ensure we haven't broken anything. Let me first check what tests exist for the debug decorators:\n\n```bash\ncd /testbed && python -m pytest tests/view_tests/tests/test_debug.py -v\n```",
-    "reward": 0.33007848959999997
+    "reward": 0.8376375551999999
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try using Django's test runner instead:\n\n```bash\ncd /testbed && python -m django test view_tests.tests.test_debug --settings=tests.test_sqlite\n```",
-    "reward": 0.05013081599999997
+    "reward": 0.3960625919999999
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try a different approach to run the tests:\n\n```bash\ncd /testbed && python tests/runtests.py view_tests.tests.test_debug -v 2\n```",
-    "reward": 0.58355136
+    "reward": 1.1601043199999999
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All 73 tests in the debug test suite passed. Now let me also test some edge cases to ensure the fix is robust. Let me create a comprehensive edge case test:\n\n```bash\ncat <<'EOF' > /testbed/test_edge_cases.py\n\"\"\"Test edge cases for the decorator safeguard\"\"\"\nimport sys\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n    )\n    django.setup()\n\nfrom django.views.decorators.debug import sensitive_variables, sensitive_post_parameters\nfrom django.http import HttpRequest\n\nprint(\"=\" * 70)\nprint(\"Edge Case 1: Multiple string arguments should work\")\nprint(\"=\" * 70)\n\n@sensitive_variables('var1', 'var2', 'var3')\ndef func_with_multiple_vars(var1, var2, var3):\n    return var1 + var2 + var3\n\nresult = func_with_multiple_vars(1, 2, 3)\nprint(f\"func_with_multiple_vars(1, 2, 3) = {result}\")\nassert result == 6\nprint(\"[PASS] Multiple string arguments work correctly\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Edge Case 2: Empty call should work\")\nprint(\"=\" * 70)\n\n@sensitive_variables()\ndef func_with_no_vars():\n    return \"success\"\n\nresult = func_with_no_vars()\nprint(f\"func_with_no_vars() = {result}\")\nassert result == \"success\"\nprint(\"[PASS] Empty call works correctly\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Edge Case 3: Single string argument should work\")\nprint(\"=\" * 70)\n\n@sensitive_variables('password')\ndef func_with_one_var(password):\n    return len(password)\n\nresult = func_with_one_var(\"test\")\nprint(f\"func_with_one_var('test') = {result}\")\nassert result == 4\nprint(\"[PASS] Single string argument works correctly\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Edge Case 4: Passing a callable should raise TypeError\")\nprint(\"=\" * 70)\n\ndef some_function():\n    pass\n\ntry:\n    # This simulates what happens when you forget parentheses\n    decorator = sensitive_variables(some_function)\n    print(\"ERROR: No exception was raised!\")\n    sys.exit(1)\nexcept TypeError as e:\n    print(f\"[PASS] TypeError raised: {e}\")\n    print()\n\nprint(\"=\" * 70)\nprint(\"Edge Case 5: Passing multiple callables should NOT raise (edge case)\")\nprint(\"=\" * 70)\n\n# This is an edge case - if someone passes multiple callables, we don't catch it\n# because the check is specifically for len(variables) == 1 and callable(variables[0])\n# This is intentional to avoid false positives\ndef func1():\n    pass\n\ndef func2():\n    pass\n\ntry:\n    # This should NOT raise because we only check for single callable\n    decorator = sensitive_variables(func1, func2)\n    print(\"[PASS] Multiple callables don't trigger the safeguard (expected behavior)\")\n    print(\"Note: This is an edge case that's unlikely in practice\")\nexcept TypeError as e:\n    print(f\"Unexpected TypeError: {e}\")\n    sys.exit(1)\nprint()\n\nprint(\"=\" * 70)\nprint(\"Edge Case 6: sensitive_post_parameters with HttpRequest\")\nprint(\"=\" * 70)\n\n@sensitive_post_parameters('password', 'credit_card')\ndef view_func(request):\n    return \"OK\"\n\nrequest = HttpRequest()\nresult = view_func(request)\nprint(f\"view_func(request) = {result}\")\nassert result == \"OK\"\nprint(\"[PASS] sensitive_post_parameters works with HttpRequest\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Edge Case 7: Verify sensitive_variables attribute is set correctly\")\nprint(\"=\" * 70)\n\n@sensitive_variables('secret')\ndef func_with_secret(secret):\n    return secret\n\n# Call the function to set the attribute\nfunc_with_secret(\"test\")\nprint(f\"func_with_secret.sensitive_variables = {func_with_secret.sensitive_variables}\")\nassert func_with_secret.sensitive_variables == ('secret',)\nprint(\"[PASS] sensitive_variables attribute is set correctly\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"Edge Case 8: Verify __ALL__ is set when no args provided\")\nprint(\"=\" * 70)\n\n@sensitive_variables()\ndef func_all_sensitive():\n    return \"test\"\n\n# Call the function to set the attribute\nfunc_all_sensitive()\nprint(f\"func_all_sensitive.sensitive_variables = {func_all_sensitive.sensitive_variables}\")\nassert func_all_sensitive.sensitive_variables == '__ALL__'\nprint(\"[PASS] __ALL__ is set when no arguments provided\")\nprint()\n\nprint(\"=\" * 70)\nprint(\"ALL EDGE CASE TESTS PASSED!\")\nprint(\"=\" * 70)\nEOF\n```",
-    "reward": 0.47258559999999994
+    "reward": 0.9335072
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the edge case tests:\n\n```bash\ncd /testbed && python test_edge_cases.py\n```",
-    "reward": 0.620976
+    "reward": 1.2225119999999998
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All edge cases pass. Now let me also run the auth_tests to ensure the sensitive_post_parameters decorator still works correctly in authentication contexts:\n\n```bash\ncd /testbed && python tests/runtests.py auth_tests.test_auth_backends -v 0 2>&1 | tail -20\n```",
-    "reward": 0.5349599999999999
+    "reward": 1.0375199999999998
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Let me create one more test to verify the exact scenario from the PR description works as expected:\n\n```bash\ncat <<'EOF' > /testbed/test_pr_scenario.py\n\"\"\"Test the exact scenario from the PR description\"\"\"\nimport sys\n\nprint(\"=\" * 70)\nprint(\"Testing the exact scenario from the PR description\")\nprint(\"=\" * 70)\nprint()\n\nprint(\"Before the fix, this code would have a subtle bug:\")\nprint(\"@sensitive_variables  # incorrect usage, missing ()\")\nprint(\"def is_password_ok(password):\")\nprint(\"    return len(password) > 8\")\nprint()\nprint(\"bool(is_password_ok('asdf')) would return True instead of False\")\nprint()\nprint(\"After the fix, this should raise a TypeError at import time:\")\nprint()\n\ntry:\n    from django.views.decorators.debug import sensitive_variables\n    \n    @sensitive_variables  # incorrect usage, should be @sensitive_variables()\n    def is_password_ok(password):\n        return len(password) > 8\n    \n    print(\"ERROR: No exception was raised! The bug still exists.\")\n    sys.exit(1)\n    \nexcept TypeError as e:\n    print(f\"SUCCESS! TypeError raised at import time:\")\n    print(f\"  {e}\")\n    print()\n    print(\"This prevents the subtle bug where:\")\n    print(\"  - The function would be replaced by a decorator\")\n    print(\"  - bool(is_password_ok('asdf')) would return True (wrong!)\")\n    print(\"  - Instead of False (correct)\")\n    print()\n    print(\"The developer now gets a clear error message at import time,\")\n    print(\"making it easy to fix the decorator usage.\")\n    print()\n    print(\"[PASS] The PR requirement is satisfied!\")\nEOF\n```",
-    "reward": 0.39159999999999995
+    "reward": 0.7291999999999998
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this final test to confirm the PR scenario is fixed:\n\n```bash\ncd /testbed && python test_pr_scenario.py\n```",
-    "reward": 0.486
+    "reward": 0.8819999999999999
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The implementation is complete and working correctly. Let me verify the implementation one more time by viewing the final code:\n\n```bash\ncat /testbed/django/views/decorators/debug.py\n```",
-    "reward": 0.31
+    "reward": 0.47
   },
   {
     "role": "user",
@@ -312,7 +312,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The implementation is complete and correct. Let me now create a summary of what was done and submit the final output. Let me check what files have been modified:\n\n```bash\ncd /testbed && git status\n```",
-    "reward": 0.6
+    "reward": 0.7
   },
   {
     "role": "user",

@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the previous attempt analysis, particularly the runserver/WSGI server code in django/core/servers/basehttp.py.\n\n```bash\nfind /testbed -type f -name \"basehttp.py\" | head -20\n```",
-    "reward": 0.06064503383226299
+    "reward": 0.32130818177242426
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the basehttp.py file. Let me examine its contents to understand the current implementation and see where we need to add the ServerHandler.write() override to suppress response bodies for HEAD requests.\n\n```bash\ncat /testbed/django/core/servers/basehttp.py\n```",
-    "reward": 0.10107505638710498
+    "reward": 0.36884696962070707
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I can see the ServerHandler class that extends simple_server.ServerHandler. According to the previous attempt analysis, I need to override the write() method in ServerHandler to suppress the response body for HEAD requests while still sending headers. Let me first check what the parent class's write() method looks like in wsgiref to understand what we're overriding.\n\n```bash\npython3 -c \"import wsgiref.handlers; import inspect; print(inspect.getsource(wsgiref.handlers.BaseHandler.write))\"\n```",
-    "reward": -0.08154157268815834
+    "reward": 0.11474494936784499
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now I understand the structure. The write() method in BaseHandler:\n1. Asserts data is bytes\n2. Sends headers if not sent yet\n3. Tracks bytes_sent\n4. Calls _write() and _flush() to actually send the data\n\nFor HEAD requests, I need to override this to skip the _write() and _flush() calls when REQUEST_METHOD is 'HEAD', but still send headers and track the content length. Let me create a reproduction script first to verify the issue exists.\n\n```bash\ncat <<'EOF' > /testbed/test_head_request.py\n#!/usr/bin/env python\n\"\"\"\nTest script to reproduce the HEAD request issue with runserver.\n\"\"\"\nimport os\nimport sys\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        ROOT_URLCONF='test_urls',\n        MIDDLEWARE=[],\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n    )\n    django.setup()\n\n# Create a simple URL configuration\nfrom django.http import HttpResponse, StreamingHttpResponse, FileResponse\nfrom django.urls import path\nimport io\n\ndef simple_view(request):\n    return HttpResponse(b\"Hello, World!\")\n\ndef streaming_view(request):\n    def generator():\n        yield b\"Chunk 1\\n\"\n        yield b\"Chunk 2\\n\"\n        yield b\"Chunk 3\\n\"\n    return StreamingHttpResponse(generator())\n\ndef file_view(request):\n    content = b\"File content here\"\n    return FileResponse(io.BytesIO(content), content_type='text/plain')\n\nurlpatterns = [\n    path('simple/', simple_view),\n    path('streaming/', streaming_view),\n    path('file/', file_view),\n]\n\n# Create test_urls module\nwith open('/testbed/test_urls.py', 'w') as f:\n    f.write(\"\"\"\nfrom django.http import HttpResponse, StreamingHttpResponse, FileResponse\nfrom django.urls import path\nimport io\n\ndef simple_view(request):\n    return HttpResponse(b\"Hello, World!\")\n\ndef streaming_view(request):\n    def generator():\n        yield b\"Chunk 1\\\\n\"\n        yield b\"Chunk 2\\\\n\"\n        yield b\"Chunk 3\\\\n\"\n    return StreamingHttpResponse(generator())\n\ndef file_view(request):\n    content = b\"File content here\"\n    return FileResponse(io.BytesIO(content), content_type='text/plain')\n\nurlpatterns = [\n    path('simple/', simple_view),\n    path('streaming/', streaming_view),\n    path('file/', file_view),\n]\n\"\"\")\n\n# Test the ServerHandler directly\nfrom django.core.servers.basehttp import ServerHandler\nfrom io import BytesIO\n\ndef test_head_request():\n    \"\"\"Test that HEAD requests don't return a body\"\"\"\n    \n    # Simulate a HEAD request environment\n    environ = {\n        'REQUEST_METHOD': 'HEAD',\n        'PATH_INFO': '/simple/',\n        'SERVER_NAME': 'testserver',\n        'SERVER_PORT': '8000',\n        'wsgi.version': (1, 0),\n        'wsgi.url_scheme': 'http',\n        'wsgi.input': BytesIO(),\n        'wsgi.errors': sys.stderr,\n        'wsgi.multithread': False,\n        'wsgi.multiprocess': True,\n        'wsgi.run_once': False,\n    }\n    \n    # Create mock stdin, stdout, stderr\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    # Create handler\n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    \n    # Simple WSGI app that returns content\n    def simple_app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', '13')]\n        start_response(status, response_headers)\n        return [b'Hello, World!']\n    \n    # Run the app\n    handler.run(simple_app)\n    \n    # Get the output\n    output = stdout.getvalue()\n    \n    print(\"=== HEAD Request Output ===\")\n    print(output.decode('latin-1'))\n    print(\"=== End Output ===\")\n    \n    # Check if body is present\n    if b'Hello, World!' in output:\n        print(\"\\n\u274c FAIL: Body found in HEAD response (should be empty)\")\n        return False\n    else:\n        print(\"\\n\u2713 PASS: No body in HEAD response\")\n        return True\n\ndef test_get_request():\n    \"\"\"Test that GET requests still return a body\"\"\"\n    \n    # Simulate a GET request environment\n    environ = {\n        'REQUEST_METHOD': 'GET',\n        'PATH_INFO': '/simple/',\n        'SERVER_NAME': 'testserver',\n        'SERVER_PORT': '8000',\n        'wsgi.version': (1, 0),\n        'wsgi.url_scheme': 'http',\n        'wsgi.input': BytesIO(),\n        'wsgi.errors': sys.stderr,\n        'wsgi.multithread': False,\n        'wsgi.multiprocess': True,\n        'wsgi.run_once': False,\n    }\n    \n    # Create mock stdin, stdout, stderr\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    # Create handler\n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    \n    # Simple WSGI app that returns content\n    def simple_app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', '13')]\n        start_response(status, response_headers)\n        return [b'Hello, World!']\n    \n    # Run the app\n    handler.run(simple_app)\n    \n    # Get the output\n    output = stdout.getvalue()\n    \n    print(\"\\n=== GET Request Output ===\")\n    print(output.decode('latin-1'))\n    print(\"=== End Output ===\")\n    \n    # Check if body is present\n    if b'Hello, World!' in output:\n        print(\"\\n\u2713 PASS: Body found in GET response\")\n        return True\n    else:\n        print(\"\\n\u274c FAIL: No body in GET response (should have body)\")\n        return False\n\nif __name__ == '__main__':\n    print(\"Testing HEAD and GET request handling in ServerHandler\\n\")\n    print(\"=\" * 60)\n    \n    head_pass = test_head_request()\n    get_pass = test_get_request()\n    \n    print(\"\\n\" + \"=\" * 60)\n    print(\"SUMMARY:\")\n    print(f\"  HEAD test: {'PASS' if head_pass else 'FAIL'}\")\n    print(f\"  GET test:  {'PASS' if get_pass else 'FAIL'}\")\n    \n    if head_pass and get_pass:\n        print(\"\\n\u2713 All tests passed!\")\n        sys.exit(0)\n    else:\n        print(\"\\n\u274c Some tests failed!\")\n        sys.exit(1)\nEOF\n```",
-    "reward": -0.13590262114693058
+    "reward": 0.024574915613074982
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the test script to confirm the issue exists before applying the fix.\n\n```bash\ncd /testbed && python test_head_request.py\n```",
-    "reward": -0.39317103524488434
+    "reward": -0.2923751406448751
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The test script has issues because ServerHandler expects a request_handler attribute. Let me simplify the test to work around this by mocking the necessary attributes or using a simpler approach. Let me create a better test script.\n\n```bash\ncat <<'EOF' > /testbed/test_head_simple.py\n#!/usr/bin/env python\n\"\"\"\nSimple test to check if HEAD requests return body content.\n\"\"\"\nimport sys\nfrom io import BytesIO\nfrom django.core.servers.basehttp import ServerHandler\n\nclass MockRequestHandler:\n    \"\"\"Mock request handler for testing\"\"\"\n    def __init__(self):\n        self.close_connection = False\n        \n    class MockServer:\n        pass\n    \n    server = MockServer()\n    \n    def log_request(self, code='-', size='-'):\n        pass\n\ndef test_head_request():\n    \"\"\"Test that HEAD requests don't return a body\"\"\"\n    \n    # Simulate a HEAD request environment\n    environ = {\n        'REQUEST_METHOD': 'HEAD',\n        'PATH_INFO': '/test/',\n        'SERVER_NAME': 'testserver',\n        'SERVER_PORT': '8000',\n        'wsgi.version': (1, 0),\n        'wsgi.url_scheme': 'http',\n        'wsgi.multithread': False,\n        'wsgi.multiprocess': True,\n        'wsgi.run_once': False,\n        'CONTENT_LENGTH': '0',\n    }\n    \n    # Create mock stdin, stdout, stderr\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    # Create handler\n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    handler.request_handler = MockRequestHandler()\n    \n    # Simple WSGI app that returns content\n    def simple_app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', '13')]\n        start_response(status, response_headers)\n        return [b'Hello, World!']\n    \n    # Run the app\n    handler.run(simple_app)\n    \n    # Get the output\n    output = stdout.getvalue()\n    \n    print(\"=== HEAD Request Output ===\")\n    print(repr(output))\n    print(\"=== End Output ===\")\n    \n    # Check if body is present\n    if b'Hello, World!' in output:\n        print(\"\\n\u274c FAIL: Body found in HEAD response (should be empty)\")\n        return False\n    else:\n        print(\"\\n\u2713 PASS: No body in HEAD response\")\n        return True\n\ndef test_get_request():\n    \"\"\"Test that GET requests still return a body\"\"\"\n    \n    # Simulate a GET request environment\n    environ = {\n        'REQUEST_METHOD': 'GET',\n        'PATH_INFO': '/test/',\n        'SERVER_NAME': 'testserver',\n        'SERVER_PORT': '8000',\n        'wsgi.version': (1, 0),\n        'wsgi.url_scheme': 'http',\n        'wsgi.multithread': False,\n        'wsgi.multiprocess': True,\n        'wsgi.run_once': False,\n        'CONTENT_LENGTH': '0',\n    }\n    \n    # Create mock stdin, stdout, stderr\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    # Create handler\n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    handler.request_handler = MockRequestHandler()\n    \n    # Simple WSGI app that returns content\n    def simple_app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', '13')]\n        start_response(status, response_headers)\n        return [b'Hello, World!']\n    \n    # Run the app\n    handler.run(simple_app)\n    \n    # Get the output\n    output = stdout.getvalue()\n    \n    print(\"\\n=== GET Request Output ===\")\n    print(repr(output))\n    print(\"=== End Output ===\")\n    \n    # Check if body is present\n    if b'Hello, World!' in output:\n        print(\"\\n\u2713 PASS: Body found in GET response\")\n        return True\n    else:\n        print(\"\\n\u274c FAIL: No body in GET response (should have body)\")\n        return False\n\nif __name__ == '__main__':\n    print(\"Testing HEAD and GET request handling in ServerHandler\\n\")\n    print(\"=\" * 60)\n    \n    head_pass = test_head_request()\n    get_pass = test_get_request()\n    \n    print(\"\\n\" + \"=\" * 60)\n    print(\"SUMMARY:\")\n    print(f\"  HEAD test: {'PASS' if head_pass else 'FAIL'}\")\n    print(f\"  GET test:  {'PASS' if get_pass else 'FAIL'}\")\n    \n    if head_pass and get_pass:\n        print(\"\\n\u2713 All tests passed!\")\n        sys.exit(0)\n    else:\n        print(\"\\n\u274c Some tests failed!\")\n        sys.exit(1)\nEOF\n```",
-    "reward": -0.15528505874147389
+    "reward": 0.012708098925208161
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this simplified test to confirm the issue exists.\n\n```bash\ncd /testbed && python test_head_simple.py\n```",
-    "reward": -0.4254750979024565
+    "reward": -0.3121531684579864
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I need to add more required WSGI environment variables. Let me fix the test script with all the necessary environ keys.\n\n```bash\ncat <<'EOF' > /testbed/test_head_simple.py\n#!/usr/bin/env python\n\"\"\"\nSimple test to check if HEAD requests return body content.\n\"\"\"\nimport sys\nfrom io import BytesIO\nfrom django.core.servers.basehttp import ServerHandler\n\nclass MockRequestHandler:\n    \"\"\"Mock request handler for testing\"\"\"\n    def __init__(self):\n        self.close_connection = False\n        \n    class MockServer:\n        pass\n    \n    server = MockServer()\n    \n    def log_request(self, code='-', size='-'):\n        pass\n\ndef test_head_request():\n    \"\"\"Test that HEAD requests don't return a body\"\"\"\n    \n    # Simulate a HEAD request environment\n    environ = {\n        'REQUEST_METHOD': 'HEAD',\n        'PATH_INFO': '/test/',\n        'SERVER_NAME': 'testserver',\n        'SERVER_PORT': '8000',\n        'SERVER_PROTOCOL': 'HTTP/1.1',\n        'wsgi.version': (1, 0),\n        'wsgi.url_scheme': 'http',\n        'wsgi.multithread': False,\n        'wsgi.multiprocess': True,\n        'wsgi.run_once': False,\n        'CONTENT_LENGTH': '0',\n    }\n    \n    # Create mock stdin, stdout, stderr\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    # Create handler\n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    handler.request_handler = MockRequestHandler()\n    \n    # Simple WSGI app that returns content\n    def simple_app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', '13')]\n        start_response(status, response_headers)\n        return [b'Hello, World!']\n    \n    # Run the app\n    handler.run(simple_app)\n    \n    # Get the output\n    output = stdout.getvalue()\n    \n    print(\"=== HEAD Request Output ===\")\n    print(repr(output))\n    print(\"=== End Output ===\")\n    \n    # Check if body is present\n    if b'Hello, World!' in output:\n        print(\"\\n\u274c FAIL: Body found in HEAD response (should be empty)\")\n        return False\n    else:\n        print(\"\\n\u2713 PASS: No body in HEAD response\")\n        return True\n\ndef test_get_request():\n    \"\"\"Test that GET requests still return a body\"\"\"\n    \n    # Simulate a GET request environment\n    environ = {\n        'REQUEST_METHOD': 'GET',\n        'PATH_INFO': '/test/',\n        'SERVER_NAME': 'testserver',\n        'SERVER_PORT': '8000',\n        'SERVER_PROTOCOL': 'HTTP/1.1',\n        'wsgi.version': (1, 0),\n        'wsgi.url_scheme': 'http',\n        'wsgi.multithread': False,\n        'wsgi.multiprocess': True,\n        'wsgi.run_once': False,\n        'CONTENT_LENGTH': '0',\n    }\n    \n    # Create mock stdin, stdout, stderr\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    # Create handler\n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    handler.request_handler = MockRequestHandler()\n    \n    # Simple WSGI app that returns content\n    def simple_app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', '13')]\n        start_response(status, response_headers)\n        return [b'Hello, World!']\n    \n    # Run the app\n    handler.run(simple_app)\n    \n    # Get the output\n    output = stdout.getvalue()\n    \n    print(\"\\n=== GET Request Output ===\")\n    print(repr(output))\n    print(\"=== End Output ===\")\n    \n    # Check if body is present\n    if b'Hello, World!' in output:\n        print(\"\\n\u2713 PASS: Body found in GET response\")\n        return True\n    else:\n        print(\"\\n\u274c FAIL: No body in GET response (should have body)\")\n        return False\n\nif __name__ == '__main__':\n    print(\"Testing HEAD and GET request handling in ServerHandler\\n\")\n    print(\"=\" * 60)\n    \n    head_pass = test_head_request()\n    get_pass = test_get_request()\n    \n    print(\"\\n\" + \"=\" * 60)\n    print(\"SUMMARY:\")\n    print(f\"  HEAD test: {'PASS' if head_pass else 'FAIL'}\")\n    print(f\"  GET test:  {'PASS' if get_pass else 'FAIL'}\")\n    \n    if head_pass and get_pass:\n        print(\"\\n\u2713 All tests passed!\")\n        sys.exit(0)\n    else:\n        print(\"\\n\u274c Some tests failed!\")\n        sys.exit(1)\nEOF\n```",
-    "reward": -0.2091251631707609
+    "reward": -0.020255280763310735
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the test again with the fixed environment variables.\n\n```bash\ncd /testbed && python test_head_simple.py\n```",
-    "reward": -0.34854193861793487
+    "reward": -0.20042546793885124
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The test confirms the issue - HEAD requests are returning the body \"Hello, World!\" when they shouldn't. Now I need to implement the fix by overriding the write() method in ServerHandler to suppress the body for HEAD requests while still sending headers. Based on the previous attempt analysis, I should:\n\n1. Override the write() method in ServerHandler\n2. Check if REQUEST_METHOD is 'HEAD'\n3. If it is HEAD, send headers but skip _write() and _flush()\n4. Otherwise, call the parent's write() method\n\nLet me implement this fix:\n\n```bash\ncat <<'EOF' > /tmp/patch.py\nimport sys\n\n# Read the file\nwith open('/testbed/django/core/servers/basehttp.py', 'r') as f:\n    content = f.read()\n\n# Find the ServerHandler class and add the write method after cleanup_headers\n# We need to add it after the cleanup_headers method but before the close method\n\n# Find the position to insert the new method\nimport_section_end = content.find('class ServerHandler(simple_server.ServerHandler):')\ncleanup_headers_end = content.find('    def close(self):', import_section_end)\n\nif cleanup_headers_end == -1:\n    print(\"Error: Could not find close method\")\n    sys.exit(1)\n\n# Create the new write method\nnew_method = '''\n    def write(self, data):\n        \"\"\"'write()' callable as specified by PEP 3333\"\"\"\n        assert type(data) is bytes, \\\\\n            \"write() argument must be a bytes instance\"\n\n        if not self.status:\n            raise AssertionError(\"write() before start_response()\")\n\n        elif not self.headers_sent:\n            # Before the first output, send the stored headers\n            self.bytes_sent = len(data)    # make sure we know content-length\n            self.send_headers()\n        else:\n            self.bytes_sent += len(data)\n\n        # Don't send body for HEAD requests\n        if self.environ.get('REQUEST_METHOD') != 'HEAD':\n            # XXX check Content-Length and truncate if too many bytes written?\n            self._write(data)\n            self._flush()\n\n'''\n\n# Insert the new method before the close method\nnew_content = content[:cleanup_headers_end] + new_method + content[cleanup_headers_end:]\n\n# Write the modified content\nwith open('/testbed/django/core/servers/basehttp.py', 'w') as f:\n    f.write(new_content)\n\nprint(\"Successfully patched basehttp.py\")\nEOF\n\npython /tmp/patch.py\n```",
-    "reward": 0.0024301023034418298
+    "reward": 0.24929088676858124
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me verify the patch was applied correctly by viewing the modified ServerHandler class.\n\n```bash\nsed -n '/^class ServerHandler/,/^class WSGIRequestHandler/p' /testbed/django/core/servers/basehttp.py | head -80\n```",
-    "reward": 0.004050170505736383
+    "reward": 0.24881814461430207
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The patch has been applied correctly. The write() method now checks if the REQUEST_METHOD is 'HEAD' and skips the _write() and _flush() calls if it is, while still sending headers and tracking bytes_sent. Now let me run the test again to verify the fix works.\n\n```bash\ncd /testbed && python test_head_simple.py\n```",
-    "reward": 0.006750284176227306
+    "reward": 0.2480302410238368
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works correctly. Now let me create a more comprehensive test to verify edge cases like streaming responses, file responses, and responses without Content-Length headers.\n\n```bash\ncat <<'EOF' > /testbed/test_head_comprehensive.py\n#!/usr/bin/env python\n\"\"\"\nComprehensive test for HEAD request handling.\n\"\"\"\nimport sys\nfrom io import BytesIO\nfrom django.core.servers.basehttp import ServerHandler\n\nclass MockRequestHandler:\n    \"\"\"Mock request handler for testing\"\"\"\n    def __init__(self):\n        self.close_connection = False\n        \n    class MockServer:\n        pass\n    \n    server = MockServer()\n    \n    def log_request(self, code='-', size='-'):\n        pass\n\ndef create_environ(method='GET'):\n    \"\"\"Create a basic WSGI environ dict\"\"\"\n    return {\n        'REQUEST_METHOD': method,\n        'PATH_INFO': '/test/',\n        'SERVER_NAME': 'testserver',\n        'SERVER_PORT': '8000',\n        'SERVER_PROTOCOL': 'HTTP/1.1',\n        'wsgi.version': (1, 0),\n        'wsgi.url_scheme': 'http',\n        'wsgi.multithread': False,\n        'wsgi.multiprocess': True,\n        'wsgi.run_once': False,\n        'CONTENT_LENGTH': '0',\n    }\n\ndef run_wsgi_app(app, method='GET'):\n    \"\"\"Run a WSGI app and return the output\"\"\"\n    environ = create_environ(method)\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    handler.request_handler = MockRequestHandler()\n    handler.run(app)\n    \n    return stdout.getvalue()\n\ndef test_simple_response():\n    \"\"\"Test simple response with Content-Length\"\"\"\n    print(\"\\n1. Testing simple response with Content-Length...\")\n    \n    def app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', '13')]\n        start_response(status, response_headers)\n        return [b'Hello, World!']\n    \n    # Test HEAD\n    output = run_wsgi_app(app, 'HEAD')\n    if b'Hello, World!' in output:\n        print(\"   \u274c FAIL: Body found in HEAD response\")\n        return False\n    if b'Content-Length: 13' not in output:\n        print(\"   \u274c FAIL: Content-Length header missing\")\n        return False\n    print(\"   \u2713 PASS: HEAD response has no body but has Content-Length\")\n    \n    # Test GET\n    output = run_wsgi_app(app, 'GET')\n    if b'Hello, World!' not in output:\n        print(\"   \u274c FAIL: Body missing in GET response\")\n        return False\n    print(\"   \u2713 PASS: GET response has body\")\n    \n    return True\n\ndef test_streaming_response():\n    \"\"\"Test streaming response (no Content-Length)\"\"\"\n    print(\"\\n2. Testing streaming response (no Content-Length)...\")\n    \n    def app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain')]\n        start_response(status, response_headers)\n        return [b'Chunk1', b'Chunk2', b'Chunk3']\n    \n    # Test HEAD\n    output = run_wsgi_app(app, 'HEAD')\n    if b'Chunk' in output:\n        print(\"   \u274c FAIL: Body chunks found in HEAD response\")\n        return False\n    if b'Connection: close' not in output:\n        print(\"   \u274c FAIL: Connection: close header missing (expected when no Content-Length)\")\n        return False\n    print(\"   \u2713 PASS: HEAD response has no body and Connection: close\")\n    \n    # Test GET\n    output = run_wsgi_app(app, 'GET')\n    if b'Chunk1' not in output or b'Chunk2' not in output or b'Chunk3' not in output:\n        print(\"   \u274c FAIL: Body chunks missing in GET response\")\n        return False\n    print(\"   \u2713 PASS: GET response has all chunks\")\n    \n    return True\n\ndef test_empty_response():\n    \"\"\"Test empty response\"\"\"\n    print(\"\\n3. Testing empty response...\")\n    \n    def app(environ, start_response):\n        status = '204 No Content'\n        response_headers = [('Content-Type', 'text/plain')]\n        start_response(status, response_headers)\n        return []\n    \n    # Test HEAD\n    output = run_wsgi_app(app, 'HEAD')\n    if b'204 No Content' not in output:\n        print(\"   \u274c FAIL: Status line missing\")\n        return False\n    print(\"   \u2713 PASS: HEAD response for 204 works\")\n    \n    # Test GET\n    output = run_wsgi_app(app, 'GET')\n    if b'204 No Content' not in output:\n        print(\"   \u274c FAIL: Status line missing\")\n        return False\n    print(\"   \u2713 PASS: GET response for 204 works\")\n    \n    return True\n\ndef test_large_response():\n    \"\"\"Test large response\"\"\"\n    print(\"\\n4. Testing large response...\")\n    \n    large_content = b'X' * 10000\n    \n    def app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', str(len(large_content)))]\n        start_response(status, response_headers)\n        return [large_content]\n    \n    # Test HEAD\n    output = run_wsgi_app(app, 'HEAD')\n    if large_content in output:\n        print(\"   \u274c FAIL: Large body found in HEAD response\")\n        return False\n    if b'Content-Length: 10000' not in output:\n        print(\"   \u274c FAIL: Content-Length header missing or incorrect\")\n        return False\n    print(\"   \u2713 PASS: HEAD response has no body but correct Content-Length\")\n    \n    # Test GET\n    output = run_wsgi_app(app, 'GET')\n    if large_content not in output:\n        print(\"   \u274c FAIL: Large body missing in GET response\")\n        return False\n    print(\"   \u2713 PASS: GET response has full body\")\n    \n    return True\n\ndef test_post_request():\n    \"\"\"Test POST request (should have body)\"\"\"\n    print(\"\\n5. Testing POST request...\")\n    \n    def app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain'), ('Content-Length', '7')]\n        start_response(status, response_headers)\n        return [b'Created']\n    \n    # Test POST\n    environ = create_environ('POST')\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    handler.request_handler = MockRequestHandler()\n    handler.run(app)\n    \n    output = stdout.getvalue()\n    if b'Created' not in output:\n        print(\"   \u274c FAIL: Body missing in POST response\")\n        return False\n    print(\"   \u2713 PASS: POST response has body\")\n    \n    return True\n\nif __name__ == '__main__':\n    print(\"=\" * 60)\n    print(\"Comprehensive HEAD Request Tests\")\n    print(\"=\" * 60)\n    \n    tests = [\n        test_simple_response,\n        test_streaming_response,\n        test_empty_response,\n        test_large_response,\n        test_post_request,\n    ]\n    \n    results = []\n    for test in tests:\n        try:\n            results.append(test())\n        except Exception as e:\n            print(f\"   \u274c EXCEPTION: {e}\")\n            results.append(False)\n    \n    print(\"\\n\" + \"=\" * 60)\n    print(\"SUMMARY:\")\n    print(f\"  Passed: {sum(results)}/{len(results)}\")\n    print(f\"  Failed: {len(results) - sum(results)}/{len(results)}\")\n    \n    if all(results):\n        print(\"\\n\u2713 All tests passed!\")\n        sys.exit(0)\n    else:\n        print(\"\\n\u274c Some tests failed!\")\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.09458380696037885
+    "reward": 0.33005040170639466
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the comprehensive test to ensure the fix handles various edge cases correctly.\n\n```bash\ncd /testbed && python test_head_comprehensive.py\n```",
-    "reward": -0.009026988399368588
+    "reward": 0.21675066951065772
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All comprehensive tests pass. Now let me test with an actual Django runserver scenario to make sure it works end-to-end. Let me create a simple Django project and test it with curl as described in the PR.\n\n```bash\ncat <<'EOF' > /testbed/test_runserver.py\n#!/usr/bin/env python\n\"\"\"\nTest runserver with actual HTTP requests\n\"\"\"\nimport os\nimport sys\nimport time\nimport subprocess\nimport signal\nimport requests\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')\n\n# Create test settings\nwith open('/testbed/test_settings.py', 'w') as f:\n    f.write(\"\"\"\nDEBUG = True\nSECRET_KEY = 'test-secret-key'\nROOT_URLCONF = 'test_urls'\nALLOWED_HOSTS = ['*']\nMIDDLEWARE = []\nINSTALLED_APPS = []\n\"\"\")\n\n# Create test URLs\nwith open('/testbed/test_urls.py', 'w') as f:\n    f.write(\"\"\"\nfrom django.http import HttpResponse\nfrom django.urls import path\n\ndef test_view(request):\n    return HttpResponse(b'Hello, World!', content_type='text/plain')\n\nurlpatterns = [\n    path('test/', test_view),\n]\n\"\"\")\n\nimport django\ndjango.setup()\n\ndef test_with_runserver():\n    \"\"\"Test HEAD request with actual runserver\"\"\"\n    print(\"Starting Django runserver...\")\n    \n    # Start runserver in background\n    proc = subprocess.Popen(\n        [sys.executable, '-m', 'django', 'runserver', '127.0.0.1:8765', '--noreload'],\n        stdout=subprocess.PIPE,\n        stderr=subprocess.PIPE,\n        env=os.environ.copy()\n    )\n    \n    # Wait for server to start\n    time.sleep(2)\n    \n    try:\n        # Test HEAD request\n        print(\"\\nTesting HEAD request...\")\n        response = requests.head('http://127.0.0.1:8765/test/')\n        print(f\"Status: {response.status_code}\")\n        print(f\"Headers: {dict(response.headers)}\")\n        print(f\"Content length from header: {response.headers.get('Content-Length', 'Not set')}\")\n        print(f\"Actual content length: {len(response.content)}\")\n        \n        if response.content:\n            print(f\"\u274c FAIL: HEAD response has body: {response.content}\")\n            return False\n        else:\n            print(\"\u2713 PASS: HEAD response has no body\")\n        \n        # Test GET request\n        print(\"\\nTesting GET request...\")\n        response = requests.get('http://127.0.0.1:8765/test/')\n        print(f\"Status: {response.status_code}\")\n        print(f\"Content: {response.content}\")\n        \n        if response.content == b'Hello, World!':\n            print(\"\u2713 PASS: GET response has correct body\")\n            return True\n        else:\n            print(f\"\u274c FAIL: GET response has wrong body: {response.content}\")\n            return False\n            \n    finally:\n        # Stop server\n        print(\"\\nStopping runserver...\")\n        proc.send_signal(signal.SIGTERM)\n        proc.wait(timeout=5)\n\nif __name__ == '__main__':\n    try:\n        success = test_with_runserver()\n        sys.exit(0 if success else 1)\n    except Exception as e:\n        print(f\"Error: {e}\")\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": -0.015044980665614313
+    "reward": 0.19458444918442952
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the runserver test to verify the fix works with actual HTTP requests.\n\n```bash\ncd /testbed && python test_runserver.py\n```",
-    "reward": -0.19174163444269055
+    "reward": -0.009025918025950805
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix works correctly with actual HTTP requests through runserver. Now let me also test with curl as mentioned in the PR description to ensure it matches the expected behavior.\n\n```bash\ncat <<'EOF' > /testbed/test_curl.sh\n#!/bin/bash\n# Test with curl as described in the PR\n\n# Setup Django\nexport DJANGO_SETTINGS_MODULE=test_settings\n\n# Start runserver in background\npython3 -m django runserver 127.0.0.1:8766 --noreload &\nSERVER_PID=$!\n\n# Wait for server to start\nsleep 2\n\necho \"Testing with curl -iX HEAD...\"\necho \"================================\"\ncurl -iX HEAD http://127.0.0.1:8766/test/\necho \"\"\necho \"================================\"\n\necho \"\"\necho \"Testing with curl -iX GET...\"\necho \"================================\"\ncurl -iX GET http://127.0.0.1:8766/test/\necho \"\"\necho \"================================\"\n\n# Stop server\nkill $SERVER_PID\nwait $SERVER_PID 2>/dev/null\nEOF\n\nchmod +x /testbed/test_curl.sh && cd /testbed && ./test_curl.sh\n```",
-    "reward": -0.3195693907378176
+    "reward": -0.18170986337658468
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The curl test shows that:\n1. HEAD request returns only headers (no body after the blank line)\n2. GET request returns headers AND body (\"Hello, World!\")\n\nThis matches the expected behavior from the PR description. Now let me run Django's existing test suite to make sure we haven't broken anything. Let me check if there are existing tests for the server functionality.\n\n```bash\nfind /testbed -type f -path \"*/tests/*\" -name \"*server*.py\" | grep -E \"test.*\\.py$\" | head -10\n```",
-    "reward": -0.03261565122969599
+    "reward": 0.19715022770569218
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check if there are tests related to handlers or WSGI that might be affected by our change.\n\n```bash\nfind /testbed/tests -type f -name \"*.py\" | xargs grep -l \"ServerHandler\\|runserver\\|HEAD.*request\" | head -10\n```",
-    "reward": -0.054359418716159985
+    "reward": 0.16191704617615363
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the builtin_server tests and test_client tests related to conditional content removal, as these are most likely to be affected by our change.\n\n```bash\ncat /testbed/tests/builtin_server/tests.py\n```",
-    "reward": -0.09059903119359998
+    "reward": 0.10319507696025605
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I can see that the builtin_server tests have their own ServerHandler implementation for testing purposes. Let me check the test_client tests related to conditional content removal, which likely tests HEAD request behavior.\n\n```bash\ncat /testbed/tests/test_client/test_conditional_content_removal.py\n```",
-    "reward": -0.234331718656
+    "reward": -0.07800820506623996
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! This test shows that Django's test client has a `conditional_content_removal` function that strips content for HEAD requests at the test client level. Our fix is at the server level (runserver), which is correct since production WSGI servers handle this at the server level too. Let me run the builtin_server tests to make sure our changes don't break anything.\n\n```bash\ncd /testbed && python -m pytest tests/builtin_server/tests.py -xvs\n```",
-    "reward": -0.47388619775999996
+    "reward": -0.38001367511039996
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me use Django's test runner instead.\n\n```bash\ncd /testbed && python -m django test builtin_server --settings=test_settings -v 2\n```",
-    "reward": -0.28981032959999997
+    "reward": -0.133356125184
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the tests properly using Django's test framework with the correct path.\n\n```bash\ncd /testbed && python tests/runtests.py builtin_server -v 2\n```",
-    "reward": 0.016982783999999994
+    "reward": 0.27773979136
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The builtin_server tests pass. Now let me run the test_client tests to make sure conditional content removal still works correctly.\n\n```bash\ncd /testbed && python tests/runtests.py test_client.test_conditional_content_removal -v 2\n```",
-    "reward": 0.028304639999999992
+    "reward": 0.2962329856
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Now let me run a broader set of tests related to servers and handlers to ensure nothing is broken.\n\n```bash\ncd /testbed && python tests/runtests.py servers -v 2\n```",
-    "reward": 0.04717439999999999
+    "reward": 0.32705497599999994
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All server tests pass. Now let me run the handlers tests to ensure our change doesn't break anything in the WSGI handler layer.\n\n```bash\ncd /testbed && python tests/runtests.py handlers -v 2\n```",
-    "reward": 0.07862399999999999
+    "reward": 0.3784249599999999
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me verify the final implementation one more time to ensure it follows best practices and aligns with the feedback from the previous attempt. Let me review the code:\n\n```bash\nsed -n '/class ServerHandler/,/^class WSGIRequestHandler/p' /testbed/django/core/servers/basehttp.py | head -65\n```",
-    "reward": 0.13104
+    "reward": 0.46404159999999994
   },
   {
     "role": "user",
@@ -407,7 +407,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The implementation looks good. According to the feedback from the previous attempt, I should consider using `type(data) is bytes` instead of `isinstance(data, bytes)` to align with wsgiref's strict semantics. Let me update the assertion to match the upstream behavior exactly.\n\n```bash\nsed -i 's/assert type(data) is bytes, \\\\/assert type(data) is bytes, \\\\/' /testbed/django/core/servers/basehttp.py\n```",
-    "reward": 0.21839999999999998
+    "reward": 0.6067359999999999
   },
   {
     "role": "user",
@@ -421,7 +421,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Actually, that command didn't change anything because the code already uses `type(data) is bytes`. Let me verify the current state is correct:\n\n```bash\ngrep -A 2 \"def write(self, data):\" /testbed/django/core/servers/basehttp.py\n```",
-    "reward": 0.11399999999999999
+    "reward": 0.34456
   },
   {
     "role": "user",
@@ -435,7 +435,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The assertion already uses `type(data) is bytes` which matches wsgiref's strict semantics. Now let me create one final comprehensive test to verify the fix handles all the edge cases mentioned in the PR and the previous attempt feedback, including verifying that Content-Length is preserved.\n\n```bash\ncat <<'EOF' > /testbed/test_final_verification.py\n#!/usr/bin/env python\n\"\"\"\nFinal verification test for HEAD request fix.\nTests all edge cases and requirements from the PR.\n\"\"\"\nimport sys\nfrom io import BytesIO\nfrom django.core.servers.basehttp import ServerHandler\n\nclass MockRequestHandler:\n    \"\"\"Mock request handler for testing\"\"\"\n    def __init__(self):\n        self.close_connection = False\n        \n    class MockServer:\n        pass\n    \n    server = MockServer()\n    \n    def log_request(self, code='-', size='-'):\n        pass\n\ndef create_environ(method='GET'):\n    \"\"\"Create a basic WSGI environ dict\"\"\"\n    return {\n        'REQUEST_METHOD': method,\n        'PATH_INFO': '/test/',\n        'SERVER_NAME': 'testserver',\n        'SERVER_PORT': '8000',\n        'SERVER_PROTOCOL': 'HTTP/1.1',\n        'wsgi.version': (1, 0),\n        'wsgi.url_scheme': 'http',\n        'wsgi.multithread': False,\n        'wsgi.multiprocess': True,\n        'wsgi.run_once': False,\n        'CONTENT_LENGTH': '0',\n    }\n\ndef run_wsgi_app(app, method='GET'):\n    \"\"\"Run a WSGI app and return the output\"\"\"\n    environ = create_environ(method)\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    handler.request_handler = MockRequestHandler()\n    handler.run(app)\n    \n    return stdout.getvalue()\n\ndef test_rfc_compliance():\n    \"\"\"\n    Test RFC 2616 Section 4.3 compliance:\n    Response bodies must not be returned for HEAD requests.\n    \"\"\"\n    print(\"\\n1. RFC 2616 Section 4.3 Compliance Test\")\n    print(\"   Testing that HEAD requests return no body...\")\n    \n    def app(environ, start_response):\n        status = '200 OK'\n        response_headers = [\n            ('Content-Type', 'text/html'),\n            ('Content-Length', '100'),\n        ]\n        start_response(status, response_headers)\n        # Return a body that should be stripped for HEAD\n        return [b'<!DOCTYPE html>\\n<html><body>Hello</body></html>']\n    \n    # Test HEAD\n    output = run_wsgi_app(app, 'HEAD')\n    \n    # Verify headers are present\n    if b'HTTP/1.1 200 OK' not in output:\n        print(\"   \u274c FAIL: Status line missing\")\n        return False\n    \n    if b'Content-Type: text/html' not in output:\n        print(\"   \u274c FAIL: Content-Type header missing\")\n        return False\n    \n    if b'Content-Length: 100' not in output:\n        print(\"   \u274c FAIL: Content-Length header missing or incorrect\")\n        return False\n    \n    # Verify body is NOT present\n    if b'<!DOCTYPE html>' in output or b'Hello' in output:\n        print(\"   \u274c FAIL: Body found in HEAD response (RFC violation)\")\n        return False\n    \n    print(\"   \u2713 PASS: HEAD response compliant with RFC 2616\")\n    return True\n\ndef test_content_length_preserved():\n    \"\"\"\n    Test that Content-Length header is preserved for HEAD requests.\n    This is important for clients to know the size of the resource.\n    \"\"\"\n    print(\"\\n2. Content-Length Preservation Test\")\n    print(\"   Testing that Content-Length is preserved in HEAD response...\")\n    \n    def app(environ, start_response):\n        body = b'A' * 5000\n        status = '200 OK'\n        response_headers = [\n            ('Content-Type', 'text/plain'),\n            ('Content-Length', str(len(body))),\n        ]\n        start_response(status, response_headers)\n        return [body]\n    \n    # Test HEAD\n    output = run_wsgi_app(app, 'HEAD')\n    \n    if b'Content-Length: 5000' not in output:\n        print(\"   \u274c FAIL: Content-Length not preserved\")\n        return False\n    \n    if b'A' * 100 in output:  # Check if any significant part of body is present\n        print(\"   \u274c FAIL: Body found in HEAD response\")\n        return False\n    \n    print(\"   \u2713 PASS: Content-Length preserved, body stripped\")\n    return True\n\ndef test_get_still_works():\n    \"\"\"\n    Test that GET requests still return the body.\n    This ensures we didn't break normal request handling.\n    \"\"\"\n    print(\"\\n3. GET Request Regression Test\")\n    print(\"   Testing that GET requests still return body...\")\n    \n    def app(environ, start_response):\n        status = '200 OK'\n        response_headers = [\n            ('Content-Type', 'text/plain'),\n            ('Content-Length', '13'),\n        ]\n        start_response(status, response_headers)\n        return [b'Hello, World!']\n    \n    # Test GET\n    output = run_wsgi_app(app, 'GET')\n    \n    if b'Hello, World!' not in output:\n        print(\"   \u274c FAIL: Body missing in GET response\")\n        return False\n    \n    print(\"   \u2713 PASS: GET request returns body correctly\")\n    return True\n\ndef test_post_still_works():\n    \"\"\"\n    Test that POST requests still return the body.\n    \"\"\"\n    print(\"\\n4. POST Request Regression Test\")\n    print(\"   Testing that POST requests still return body...\")\n    \n    def app(environ, start_response):\n        status = '201 Created'\n        response_headers = [\n            ('Content-Type', 'application/json'),\n            ('Content-Length', '15'),\n        ]\n        start_response(status, response_headers)\n        return [b'{\"status\":\"ok\"}']\n    \n    # Test POST\n    environ = create_environ('POST')\n    stdin = BytesIO()\n    stdout = BytesIO()\n    stderr = BytesIO()\n    \n    handler = ServerHandler(stdin, stdout, stderr, environ)\n    handler.request_handler = MockRequestHandler()\n    handler.run(app)\n    \n    output = stdout.getvalue()\n    \n    if b'{\"status\":\"ok\"}' not in output:\n        print(\"   \u274c FAIL: Body missing in POST response\")\n        return False\n    \n    print(\"   \u2713 PASS: POST request returns body correctly\")\n    return True\n\ndef test_streaming_response():\n    \"\"\"\n    Test that streaming responses work correctly with HEAD.\n    \"\"\"\n    print(\"\\n5. Streaming Response Test\")\n    print(\"   Testing HEAD with streaming/chunked response...\")\n    \n    def app(environ, start_response):\n        status = '200 OK'\n        response_headers = [('Content-Type', 'text/plain')]\n        start_response(status, response_headers)\n        # Simulate streaming by yielding multiple chunks\n        return [b'Chunk1\\n', b'Chunk2\\n', b'Chunk3\\n']\n    \n    # Test HEAD\n    output = run_wsgi_app(app, 'HEAD')\n    \n    if b'Chunk' in output:\n        print(\"   \u274c FAIL: Chunks found in HEAD response\")\n        return False\n    \n    # Should have Connection: close when no Content-Length\n    if b'Connection: close' not in output:\n        print(\"   \u274c FAIL: Connection: close missing for streaming response\")\n        return False\n    \n    print(\"   \u2713 PASS: Streaming response handled correctly\")\n    return True\n\ndef test_no_broken_pipe():\n    \"\"\"\n    Test that the fix prevents \"Broken pipe\" errors.\n    This was mentioned in the PR as a symptom of the bug.\n    \"\"\"\n    print(\"\\n6. Broken Pipe Prevention Test\")\n    print(\"   Testing that compliant clients can terminate after headers...\")\n    \n    def app(environ, start_response):\n        status = '200 OK'\n        response_headers = [\n            ('Content-Type', 'text/html'),\n            ('Content-Length', '1000'),\n        ]\n        start_response(status, response_headers)\n        return [b'X' * 1000]\n    \n    # Test HEAD - the key is that we don't try to write the body\n    # which would cause a broken pipe if the client disconnects\n    output = run_wsgi_app(app, 'HEAD')\n    \n    # Verify headers sent but body not sent\n    if b'Content-Length: 1000' not in output:\n        print(\"   \u274c FAIL: Headers not sent properly\")\n        return False\n    \n    if b'X' * 100 in output:\n        print(\"   \u274c FAIL: Body sent (would cause broken pipe)\")\n        return False\n    \n    print(\"   \u2713 PASS: No body sent, preventing broken pipe errors\")\n    return True\n\nif __name__ == '__main__':\n    print(\"=\" * 70)\n    print(\"Final Verification Test Suite for HEAD Request Fix\")\n    print(\"=\" * 70)\n    \n    tests = [\n        test_rfc_compliance,\n        test_content_length_preserved,\n        test_get_still_works,\n        test_post_still_works,\n        test_streaming_response,\n        test_no_broken_pipe,\n    ]\n    \n    results = []\n    for test in tests:\n        try:\n            results.append(test())\n        except Exception as e:\n            print(f\"   \u274c EXCEPTION: {e}\")\n            import traceback\n            traceback.print_exc()\n            results.append(False)\n    \n    print(\"\\n\" + \"=\" * 70)\n    print(\"FINAL SUMMARY:\")\n    print(f\"  Passed: {sum(results)}/{len(results)}\")\n    print(f\"  Failed: {len(results) - sum(results)}/{len(results)}\")\n    \n    if all(results):\n        print(\"\\n\u2713\u2713\u2713 All verification tests passed! \u2713\u2713\u2713\")\n        print(\"\\nThe fix successfully:\")\n        print(\"  - Complies with RFC 2616 Section 4.3\")\n        print(\"  - Preserves Content-Length headers\")\n        print(\"  - Doesn't break GET/POST requests\")\n        print(\"  - Handles streaming responses correctly\")\n        print(\"  - Prevents broken pipe errors\")\n        sys.exit(0)\n    else:\n        print(\"\\n\u274c Some verification tests failed!\")\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.19
+    "reward": 0.40759999999999996
   },
   {
     "role": "user",
@@ -449,7 +449,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the final verification test to ensure everything works correctly.\n\n```bash\ncd /testbed && python test_final_verification.py\n```",
-    "reward": 0.15
+    "reward": 0.346
   },
   {
     "role": "user",
@@ -466,7 +466,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me view the final implementation one more time to document what was changed, and then submit the solution.\n\n```bash\ncat <<'EOF' > /testbed/SOLUTION_SUMMARY.md\n# Solution Summary: Fix HEAD Request Body Stripping in runserver\n\n## Problem\nAfter Django 1.10 (PR #26052), runserver was returning response bodies for HTTP HEAD requests, violating RFC 2616 Section 4.3 which states that response bodies must not be returned for HEAD requests. This also caused \"Broken pipe\" errors when compliant clients terminated connections after receiving headers.\n\n## Root Cause\nIn PR #26052, Django removed body stripping from the framework layer, expecting WSGI servers to handle it. However, the development server (runserver) using wsgiref's ServerHandler did not strip bodies for HEAD requests, unlike production servers (gunicorn, mod_wsgi, etc.).\n\n## Solution\nOverride the `write()` method in `django.core.servers.basehttp.ServerHandler` to suppress response body transmission for HEAD requests while still sending headers and tracking content length.\n\n## Implementation Details\n\n### File Modified\n- `/testbed/django/core/servers/basehttp.py`\n\n### Changes Made\nAdded a `write()` method override to the `ServerHandler` class that:\n1. Maintains all the standard WSGI write() behavior (assertions, header sending, byte tracking)\n2. Checks if the request method is 'HEAD'\n3. Skips `_write()` and `_flush()` calls for HEAD requests, preventing body transmission\n4. Preserves Content-Length and other headers as required by RFC 2616\n\n### Key Features\n- **RFC Compliant**: No body sent for HEAD requests\n- **Header Preservation**: Content-Length and other headers are still sent\n- **Non-Breaking**: GET, POST, and other methods work exactly as before\n- **Streaming Support**: Works with both regular and streaming responses\n- **Connection Handling**: Properly sets Connection: close when Content-Length is absent\n\n## Testing\nAll existing Django tests pass:\n- builtin_server tests (5 tests)\n- servers tests (27 tests)\n- handlers tests (31 tests)\n- test_client conditional content removal tests\n\nCustom verification tests confirm:\n- RFC 2616 compliance\n- Content-Length preservation\n- No regression in GET/POST handling\n- Streaming response support\n- Prevention of broken pipe errors\n\n## Alignment with Production Servers\nThis fix brings runserver's behavior in line with production WSGI servers (gunicorn, mod_wsgi, uWSGI) which already strip bodies for HEAD requests at the server layer, as intended by PR #26052.\nEOF\n\ncat /testbed/SOLUTION_SUMMARY.md\n```",
-    "reward": 0.0
+    "reward": 0.16
   },
   {
     "role": "user",
@@ -483,7 +483,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The solution is complete and thoroughly tested. Let me now submit the final output by showing the git diff of the changes made.\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 0.1
   },
   {
     "role": "user",

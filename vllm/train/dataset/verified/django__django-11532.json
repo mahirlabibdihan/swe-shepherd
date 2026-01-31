@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by understanding the repository structure and locating the relevant files mentioned in the PR description. The issue is about email messages crashing when there's a non-ASCII domain and the email encoding is non-unicode (like iso-8859-1). I need to find the mail module files, particularly `django/core/mail/message.py` and `django/core/mail/utils.py`.\n\n```bash\nfind /testbed -type f -name \"message.py\" -path \"*/mail/*\" | head -5\n```",
-    "reward": 0.09215596739661686
+    "reward": 0.37639699845588104
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the message.py file. Now let me also find the utils.py file in the mail module and understand the directory structure.\n\n```bash\nfind /testbed -type f -name \"utils.py\" -path \"*/mail/*\" | head -5\n```",
-    "reward": 0.15359327899436143
+    "reward": 0.460661664093135
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect. Now let me examine the current implementation of both files to understand how DNS_NAME is used and where the Message-ID is created.\n\n```bash\ncat /testbed/django/core/mail/utils.py\n```",
-    "reward": 0.25598879832393573
+    "reward": 0.6011027734885583
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me examine the message.py file to see how DNS_NAME is used and where the Message-ID is created.\n\n```bash\ncat /testbed/django/core/mail/message.py\n```",
-    "reward": 0.17664799720655952
+    "reward": 0.5018379558142639
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me look at the specific section where Message-ID is created, around line 260 as mentioned in the PR description.\n\n```bash\nsed -n '250,270p' /testbed/django/core/mail/message.py\n```",
-    "reward": 0.04441332867759922
+    "reward": 0.3363965930237731
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I can see the issue. At line 260, `make_msgid(domain=DNS_NAME)` is called, and DNS_NAME can contain non-ASCII characters. When the email encoding is set to something like 'iso-8859-1', the header encoding fails because it can't encode non-ASCII characters.\n\nAccording to the feedback from the previous attempt, I should:\n1. Create a centralized helper function to convert domains to punycode (IDNA encoding)\n2. Use this helper in the appropriate places\n3. Ensure proper fallback handling\n\nLet me first create a reproduction script to verify the issue:\n\n```bash\ncat <<'EOF' > /testbed/reproduce_issue.py\n#!/usr/bin/env python\n\"\"\"Reproduce the non-ASCII domain issue with email encoding.\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',\n    )\n\ndjango.setup()\n\nfrom unittest.mock import patch\nfrom django.core.mail import EmailMessage\n\nprint(\"Testing non-ASCII domain with iso-8859-1 encoding...\")\ntry:\n    with patch(\"django.core.mail.message.DNS_NAME\", \"\u6f22\u5b57\"):\n        email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n        email.encoding = 'iso-8859-1'\n        message = email.message()\n        message_id = message['Message-ID']\n        print(f\"SUCCESS: Message-ID created: {message_id}\")\n        if 'xn--' in message_id:\n            print(f\"\u2713 Domain is punycoded in Message-ID\")\n        else:\n            print(f\"\u2717 Domain is NOT punycoded in Message-ID\")\nexcept Exception as e:\n    print(f\"FAILED with error: {type(e).__name__}: {e}\")\n    import traceback\n    traceback.print_exc()\nEOF\nchmod +x /testbed/reproduce_issue.py\n```",
-    "reward": 0.07402221446266537
+    "reward": 0.39399432170628856
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script to confirm the issue exists:\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": 0.12337035743777562
+    "reward": 0.4899905361771476
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I've confirmed the issue. Now, following the feedback from the previous attempt, I need to:\n\n1. Create a centralized helper function in `utils.py` to convert domains to punycode\n2. Modify the `CachedDnsName.get_fqdn()` method to return ASCII-encoded domain\n3. Add defensive encoding in `message.py` when creating Message-ID\n\nLet me start by creating the helper function and modifying utils.py:\n\n```bash\ncat <<'EOF' > /testbed/django/core/mail/utils.py\n\"\"\"\nEmail message and email sending related helper functions.\n\"\"\"\n\nimport socket\n\n\ndef punycode_domain(domain):\n    \"\"\"\n    Convert a domain name to ASCII-compatible encoding (punycode/IDNA).\n    \n    This ensures domain names can be safely used in email headers which must be ASCII.\n    Returns the original domain if it's already ASCII or if encoding fails.\n    \n    Args:\n        domain: A domain name string (may contain non-ASCII characters)\n        \n    Returns:\n        ASCII-encoded domain name string\n    \"\"\"\n    if isinstance(domain, str):\n        try:\n            # Try to encode as ASCII first - if it works, no conversion needed\n            domain.encode('ascii')\n            return domain\n        except UnicodeEncodeError:\n            # Domain contains non-ASCII characters, convert to punycode\n            try:\n                return domain.encode('idna').decode('ascii')\n            except (UnicodeError, UnicodeDecodeError):\n                # If IDNA encoding fails, return original\n                # This shouldn't happen with valid domain names, but we handle it defensively\n                return domain\n    return str(domain)\n\n\n# Cache the hostname, but do it lazily: socket.getfqdn() can take a couple of\n# seconds, which slows down the restart of the server.\nclass CachedDnsName:\n    def __str__(self):\n        return self.get_fqdn()\n\n    def get_fqdn(self):\n        if not hasattr(self, '_fqdn'):\n            self._fqdn = punycode_domain(socket.getfqdn())\n        return self._fqdn\n\n\nDNS_NAME = CachedDnsName()\nEOF\n```",
-    "reward": 0.20561726239629272
+    "reward": 0.6499842269619127
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now I need to also add defensive encoding in message.py when creating the Message-ID. This handles cases where DNS_NAME might be patched directly with a non-ASCII string (bypassing CachedDnsName). Let me check the current line and modify it:\n\n```bash\nsed -n '255,265p' /testbed/django/core/mail/message.py\n```",
-    "reward": 0.09269543732715453
+    "reward": 0.41664037826985456
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I need to modify the message.py file to import the punycode_domain helper and use it when creating the Message-ID. Let me first check the imports section:\n\n```bash\nsed -n '1,20p' /testbed/django/core/mail/message.py\n```",
-    "reward": 0.15449239554525757
+    "reward": 0.5277339637830909
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I need to update the import to also include the punycode_domain function, and then modify the line where Message-ID is created. Let me do this with sed:\n\n```bash\nsed -i '18s/from django.core.mail.utils import DNS_NAME/from django.core.mail.utils import DNS_NAME, punycode_domain/' /testbed/django/core/mail/message.py\n```",
-    "reward": 0.2574873259087626
+    "reward": 0.7128899396384849
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I need to modify the line where Message-ID is created to use punycode_domain as a defensive measure:\n\n```bash\nsed -i '260s/msg\\[\\x27Message-ID\\x27\\] = make_msgid(domain=DNS_NAME)/msg[\\x27Message-ID\\x27] = make_msgid(domain=punycode_domain(str(DNS_NAME)))/' /testbed/django/core/mail/message.py\n```",
-    "reward": 0.17914554318127102
+    "reward": 0.5214832327308082
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me verify the changes were applied correctly:\n\n```bash\nsed -n '18p' /testbed/django/core/mail/message.py && echo \"---\" && sed -n '258,262p' /testbed/django/core/mail/message.py\n```",
-    "reward": 0.29857590530211836
+    "reward": 0.7024720545513471
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The changes look good. Now let me test the fix with the reproduction script:\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": 0.49762650883686393
+    "reward": 1.0041200909189119
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The fix is working - the Message-ID was successfully created with the punycoded domain `xn--p8s937b`. The error at the end is just from the print statement using a Unicode checkmark character. Let me update the reproduction script to avoid that issue and test more thoroughly:\n\n```bash\ncat <<'EOF' > /testbed/test_fix.py\n#!/usr/bin/env python\n\"\"\"Test the non-ASCII domain fix with email encoding.\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',\n    )\n\ndjango.setup()\n\nfrom unittest.mock import patch\nfrom django.core.mail import EmailMessage\n\nprint(\"=\" * 60)\nprint(\"Test 1: Non-ASCII domain with iso-8859-1 encoding\")\nprint(\"=\" * 60)\ntry:\n    with patch(\"django.core.mail.message.DNS_NAME\", \"\u6f22\u5b57\"):\n        email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n        email.encoding = 'iso-8859-1'\n        message = email.message()\n        message_id = message['Message-ID']\n        print(f\"SUCCESS: Message-ID created: {message_id}\")\n        if 'xn--p8s937b' in message_id:\n            print(\"PASS: Domain is punycoded in Message-ID (xn--p8s937b)\")\n        else:\n            print(f\"FAIL: Domain is NOT punycoded correctly in Message-ID\")\nexcept Exception as e:\n    print(f\"FAIL: {type(e).__name__}: {e}\")\n    import traceback\n    traceback.print_exc()\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 2: ASCII domain with iso-8859-1 encoding\")\nprint(\"=\" * 60)\ntry:\n    with patch(\"django.core.mail.message.DNS_NAME\", \"example.com\"):\n        email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n        email.encoding = 'iso-8859-1'\n        message = email.message()\n        message_id = message['Message-ID']\n        print(f\"SUCCESS: Message-ID created: {message_id}\")\n        if 'example.com' in message_id:\n            print(\"PASS: ASCII domain preserved in Message-ID\")\n        else:\n            print(f\"FAIL: ASCII domain not preserved correctly\")\nexcept Exception as e:\n    print(f\"FAIL: {type(e).__name__}: {e}\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 3: Non-ASCII domain with UTF-8 encoding\")\nprint(\"=\" * 60)\ntry:\n    with patch(\"django.core.mail.message.DNS_NAME\", \"\u6b63\u5b97\"):\n        email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n        email.encoding = 'utf-8'\n        message = email.message()\n        message_id = message['Message-ID']\n        print(f\"SUCCESS: Message-ID created: {message_id}\")\n        if 'xn--' in message_id:\n            print(\"PASS: Domain is punycoded in Message-ID\")\n        else:\n            print(f\"FAIL: Domain is NOT punycoded in Message-ID\")\nexcept Exception as e:\n    print(f\"FAIL: {type(e).__name__}: {e}\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 4: Mixed ASCII and non-ASCII labels\")\nprint(\"=\" * 60)\ntry:\n    with patch(\"django.core.mail.message.DNS_NAME\", \"test.\u6f22\u5b57.com\"):\n        email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n        email.encoding = 'iso-8859-1'\n        message = email.message()\n        message_id = message['Message-ID']\n        print(f\"SUCCESS: Message-ID created: {message_id}\")\n        if 'xn--' in message_id:\n            print(\"PASS: Domain with mixed labels is punycoded\")\n        else:\n            print(f\"FAIL: Domain with mixed labels not handled correctly\")\nexcept Exception as e:\n    print(f\"FAIL: {type(e).__name__}: {e}\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 5: Using actual CachedDnsName (not patched)\")\nprint(\"=\" * 60)\ntry:\n    # Don't patch DNS_NAME, use the actual cached value\n    email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n    email.encoding = 'iso-8859-1'\n    message = email.message()\n    message_id = message['Message-ID']\n    print(f\"SUCCESS: Message-ID created: {message_id}\")\n    print(\"PASS: Real DNS_NAME works correctly\")\nexcept Exception as e:\n    print(f\"FAIL: {type(e).__name__}: {e}\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"All tests completed!\")\nprint(\"=\" * 60)\nEOF\nchmod +x /testbed/test_fix.py && python /testbed/test_fix.py\n```",
-    "reward": 0.9127108480614399
+    "reward": 1.5902001515315198
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests are passing. Now let me run the Django mail tests to ensure we haven't broken anything:\n\n```bash\ncd /testbed && python -m pytest tests/mail/tests.py -xvs\n```",
-    "reward": 0.6045180801023999
+    "reward": 1.2336669192191998
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try using Django's test runner instead:\n\n```bash\ncd /testbed && python tests/runtests.py mail --verbosity=2\n```",
-    "reward": 0.507530133504
+    "reward": 1.0561115320319998
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All 162 tests passed. Now let me also test the specific scenario mentioned in the PR description to make sure it works correctly. Let me create a test that matches the exact test case from the PR:\n\n```bash\ncat <<'EOF' > /testbed/test_pr_scenario.py\n#!/usr/bin/env python\n\"\"\"Test the exact scenario from the PR description.\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',\n    )\n\ndjango.setup()\n\nfrom unittest.mock import patch\nfrom django.core.mail import EmailMessage\n\nprint(\"Testing the exact scenario from the PR description:\")\nprint(\"=\" * 60)\n\n# Test from PR description\nwith patch(\"django.core.mail.message.DNS_NAME\", \"\u6f22\u5b57\"):\n    email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n    email.encoding = 'iso-8859-1'\n    message = email.message()\n    message_id = message['Message-ID']\n    print(f\"Message-ID: {message_id}\")\n    \n    # Check if xn--p8s937b is in the Message-ID (punycode for \u6f22\u5b57)\n    if 'xn--p8s937b' in message_id:\n        print(\"SUCCESS: Message-ID contains punycoded domain 'xn--p8s937b'\")\n        print(\"The fix is working correctly!\")\n    else:\n        print(f\"FAIL: Expected 'xn--p8s937b' in Message-ID but got: {message_id}\")\n\nprint(\"=\" * 60)\nprint(\"\\nTesting with hostname from PR (\u6b63\u5b97):\")\nprint(\"=\" * 60)\n\nwith patch(\"django.core.mail.message.DNS_NAME\", \"\u6b63\u5b97\"):\n    email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n    email.encoding = 'iso-8859-1'\n    message = email.message()\n    message_id = message['Message-ID']\n    print(f\"Message-ID: {message_id}\")\n    \n    # Check if xn--jbt908a is in the Message-ID (punycode for \u6b63\u5b97)\n    if 'xn--jbt908a' in message_id:\n        print(\"SUCCESS: Message-ID contains punycoded domain 'xn--jbt908a'\")\n        print(\"The fix is working correctly!\")\n    else:\n        print(f\"FAIL: Expected 'xn--jbt908a' in Message-ID but got: {message_id}\")\n\nprint(\"=\" * 60)\nEOF\nchmod +x /testbed/test_pr_scenario.py && python /testbed/test_pr_scenario.py\n```",
-    "reward": 0.34588355584
+    "reward": 0.76018588672
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The test is working but there's a print encoding issue. Let me fix that and rerun:\n\n```bash\ncat <<'EOF' > /testbed/test_pr_scenario.py\n#!/usr/bin/env python\n\"\"\"Test the exact scenario from the PR description.\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',\n    )\n\ndjango.setup()\n\nfrom unittest.mock import patch\nfrom django.core.mail import EmailMessage\n\nprint(\"Testing the exact scenario from the PR description:\")\nprint(\"=\" * 60)\n\n# Test from PR description\nwith patch(\"django.core.mail.message.DNS_NAME\", \"\u6f22\u5b57\"):\n    email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n    email.encoding = 'iso-8859-1'\n    message = email.message()\n    message_id = message['Message-ID']\n    print(f\"Message-ID: {message_id}\")\n    \n    # Check if xn--p8s937b is in the Message-ID (punycode for \u6f22\u5b57)\n    if 'xn--p8s937b' in message_id:\n        print(\"SUCCESS: Message-ID contains punycoded domain 'xn--p8s937b'\")\n        print(\"The fix is working correctly!\")\n    else:\n        print(f\"FAIL: Expected 'xn--p8s937b' in Message-ID but got: {message_id}\")\n\nprint(\"=\" * 60)\nprint(\"Testing with hostname from PR (unicode hostname):\")\nprint(\"=\" * 60)\n\nwith patch(\"django.core.mail.message.DNS_NAME\", \"\u6b63\u5b97\"):\n    email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])\n    email.encoding = 'iso-8859-1'\n    message = email.message()\n    message_id = message['Message-ID']\n    print(f\"Message-ID: {message_id}\")\n    \n    # Check if xn--jbt908a is in the Message-ID (punycode for \u6b63\u5b97)\n    if 'xn--jbt908a' in message_id:\n        print(\"SUCCESS: Message-ID contains punycoded domain 'xn--jbt908a'\")\n        print(\"The fix is working correctly!\")\n    else:\n        print(f\"FAIL: Expected 'xn--jbt908a' in Message-ID but got: {message_id}\")\n\nprint(\"=\" * 60)\nEOF\npython /testbed/test_pr_scenario.py\n```",
-    "reward": -0.0901940736
+    "reward": 0.1003098112
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix is working perfectly. Now let me verify the implementation once more and check if there are any edge cases I should consider. Let me also verify that the punycode_domain function handles various edge cases properly:\n\n```bash\ncat <<'EOF' > /testbed/test_punycode_function.py\n#!/usr/bin/env python\n\"\"\"Test the punycode_domain helper function.\"\"\"\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom django.core.mail.utils import punycode_domain\n\nprint(\"Testing punycode_domain function:\")\nprint(\"=\" * 60)\n\ntest_cases = [\n    (\"example.com\", \"example.com\", \"ASCII domain unchanged\"),\n    (\"\u6f22\u5b57\", \"xn--p8s937b\", \"Non-ASCII domain converted\"),\n    (\"\u6b63\u5b97\", \"xn--jbt908a\", \"Another non-ASCII domain\"),\n    (\"test.\u6f22\u5b57.com\", \"test.xn--p8s937b.com\", \"Mixed ASCII and non-ASCII\"),\n    (\"\", \"\", \"Empty string\"),\n    (\"localhost\", \"localhost\", \"Simple ASCII hostname\"),\n]\n\nall_passed = True\nfor input_val, expected, description in test_cases:\n    result = punycode_domain(input_val)\n    passed = result == expected\n    all_passed = all_passed and passed\n    status = \"PASS\" if passed else \"FAIL\"\n    print(f\"{status}: {description}\")\n    print(f\"  Input: {repr(input_val)}\")\n    print(f\"  Expected: {expected}\")\n    print(f\"  Got: {result}\")\n    print()\n\nif all_passed:\n    print(\"=\" * 60)\n    print(\"All tests PASSED!\")\nelse:\n    print(\"=\" * 60)\n    print(\"Some tests FAILED!\")\nEOF\npython /testbed/test_punycode_function.py\n```",
-    "reward": -0.150323456
+    "reward": 0.0005163519999999977
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The function is working but there's a print encoding issue. Let me simplify the test to avoid Unicode printing issues:\n\n```bash\ncat <<'EOF' > /testbed/test_punycode_function.py\n#!/usr/bin/env python\n\"\"\"Test the punycode_domain helper function.\"\"\"\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom django.core.mail.utils import punycode_domain\n\nprint(\"Testing punycode_domain function:\")\nprint(\"=\" * 60)\n\ntest_cases = [\n    (\"example.com\", \"example.com\", \"ASCII domain unchanged\"),\n    (\"xn--p8s937b\", \"xn--p8s937b\", \"Already punycoded domain\"),\n    (\"\", \"\", \"Empty string\"),\n    (\"localhost\", \"localhost\", \"Simple ASCII hostname\"),\n]\n\n# Test non-ASCII separately to avoid print issues\nnon_ascii_tests = [\n    (\"\u6f22\u5b57\", \"xn--p8s937b\"),\n    (\"\u6b63\u5b97\", \"xn--jbt908a\"),\n    (\"test.\u6f22\u5b57.com\", \"test.xn--p8s937b.com\"),\n]\n\nall_passed = True\nfor input_val, expected, description in test_cases:\n    result = punycode_domain(input_val)\n    passed = result == expected\n    all_passed = all_passed and passed\n    status = \"PASS\" if passed else \"FAIL\"\n    print(f\"{status}: {description}\")\n    print(f\"  Expected: {expected}, Got: {result}\")\n\nprint(\"\\nTesting non-ASCII domains:\")\nfor input_val, expected in non_ascii_tests:\n    result = punycode_domain(input_val)\n    passed = result == expected\n    all_passed = all_passed and passed\n    status = \"PASS\" if passed else \"FAIL\"\n    print(f\"{status}: Expected {expected}, Got: {result}\")\n\nif all_passed:\n    print(\"\\n\" + \"=\" * 60)\n    print(\"All tests PASSED!\")\nelse:\n    print(\"\\n\" + \"=\" * 60)\n    print(\"Some tests FAILED!\")\nEOF\npython /testbed/test_punycode_function.py\n```",
-    "reward": 0.08279423999999999
+    "reward": 0.33419392
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests are passing. Now let me verify the changes I made to the code one more time to ensure everything is correct:\n\n```bash\necho \"=== Changes to utils.py ===\" && cat /testbed/django/core/mail/utils.py && echo -e \"\\n=== Changes to message.py (import line) ===\" && sed -n '18p' /testbed/django/core/mail/message.py && echo -e \"\\n=== Changes to message.py (Message-ID line) ===\" && sed -n '258,262p' /testbed/django/core/mail/message.py\n```",
-    "reward": 0.13799039999999999
+    "reward": 0.3903232
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Let me now create one final comprehensive test to ensure all edge cases are covered and the fix is robust:\n\n```bash\ncat <<'EOF' > /testbed/final_comprehensive_test.py\n#!/usr/bin/env python\n\"\"\"Comprehensive test of the non-ASCII domain fix.\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',\n    )\n\ndjango.setup()\n\nfrom unittest.mock import patch\nfrom django.core.mail import EmailMessage\n\nprint(\"COMPREHENSIVE TEST SUITE\")\nprint(\"=\" * 70)\n\ntest_scenarios = [\n    {\n        'name': 'Non-ASCII domain with iso-8859-1 encoding (PR scenario)',\n        'dns_name': '\u6f22\u5b57',\n        'encoding': 'iso-8859-1',\n        'expected_punycode': 'xn--p8s937b',\n    },\n    {\n        'name': 'Non-ASCII domain with UTF-8 encoding',\n        'dns_name': '\u6b63\u5b97',\n        'encoding': 'utf-8',\n        'expected_punycode': 'xn--jbt908a',\n    },\n    {\n        'name': 'ASCII domain with iso-8859-1 encoding',\n        'dns_name': 'example.com',\n        'encoding': 'iso-8859-1',\n        'expected_punycode': 'example.com',\n    },\n    {\n        'name': 'Mixed ASCII/non-ASCII domain',\n        'dns_name': 'mail.\u6f22\u5b57.org',\n        'encoding': 'iso-8859-1',\n        'expected_punycode': 'xn--p8s937b',\n    },\n    {\n        'name': 'Simple hostname',\n        'dns_name': 'localhost',\n        'encoding': 'iso-8859-1',\n        'expected_punycode': 'localhost',\n    },\n]\n\nall_passed = True\nfor i, scenario in enumerate(test_scenarios, 1):\n    print(f\"\\nTest {i}: {scenario['name']}\")\n    print(\"-\" * 70)\n    \n    try:\n        with patch(\"django.core.mail.message.DNS_NAME\", scenario['dns_name']):\n            email = EmailMessage('subject', 'body', 'from@example.com', ['to@example.com'])\n            email.encoding = scenario['encoding']\n            message = email.message()\n            message_id = message['Message-ID']\n            \n            if scenario['expected_punycode'] in message_id:\n                print(f\"PASS: Message-ID contains expected domain: {scenario['expected_punycode']}\")\n                print(f\"      Message-ID: {message_id}\")\n            else:\n                print(f\"FAIL: Expected '{scenario['expected_punycode']}' in Message-ID\")\n                print(f\"      Got: {message_id}\")\n                all_passed = False\n    except Exception as e:\n        print(f\"FAIL: Exception raised: {type(e).__name__}: {e}\")\n        all_passed = False\n\nprint(\"\\n\" + \"=\" * 70)\nif all_passed:\n    print(\"ALL TESTS PASSED!\")\n    print(\"The fix successfully handles non-ASCII domains in email Message-IDs.\")\nelse:\n    print(\"SOME TESTS FAILED!\")\n    \nprint(\"=\" * 70)\nEOF\npython /testbed/final_comprehensive_test.py\n```",
-    "reward": 0.229984
+    "reward": 0.48387199999999997
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests are passing. Let me now verify that the solution follows the feedback from the previous attempt:\n\n1. \u2705 Created a centralized helper function `punycode_domain()` in `utils.py`\n2. \u2705 Modified `CachedDnsName.get_fqdn()` to return ASCII-encoded domain\n3. \u2705 Added defensive encoding in `message.py` when creating Message-ID (handles patched DNS_NAME)\n4. \u2705 Proper exception handling with fallback to original domain if IDNA encoding fails\n5. \u2705 All Django mail tests pass (162 tests)\n6. \u2705 The exact scenario from the PR description now works correctly\n\nLet me create one more test to verify the behavior when DNS_NAME is used in its natural state (not patched):\n\n```bash\ncat <<'EOF' > /testbed/test_natural_dns_name.py\n#!/usr/bin/env python\n\"\"\"Test DNS_NAME in its natural state.\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\nsys.path.insert(0, '/testbed')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        SECRET_KEY='test-secret-key',\n        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',\n    )\n\ndjango.setup()\n\nfrom django.core.mail import EmailMessage\nfrom django.core.mail.utils import DNS_NAME\n\nprint(\"Testing with natural DNS_NAME (not patched):\")\nprint(\"=\" * 60)\n\n# Test with natural DNS_NAME\nemail = EmailMessage('subject', 'body', 'from@example.com', ['to@example.com'])\nemail.encoding = 'iso-8859-1'\nmessage = email.message()\nmessage_id = message['Message-ID']\n\nprint(f\"DNS_NAME value: {DNS_NAME}\")\nprint(f\"Message-ID: {message_id}\")\nprint(f\"SUCCESS: Email created without errors\")\n\n# Verify DNS_NAME is ASCII-safe\ntry:\n    str(DNS_NAME).encode('ascii')\n    print(\"PASS: DNS_NAME is ASCII-safe\")\nexcept UnicodeEncodeError:\n    print(\"FAIL: DNS_NAME contains non-ASCII characters\")\n\nprint(\"=\" * 60)\nEOF\npython /testbed/test_natural_dns_name.py\n```",
-    "reward": 0.21663999999999997
+    "reward": 0.47312
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Everything is working perfectly. Now let me review the implementation one final time to ensure it follows best practices and is consistent with the Django codebase:\n\n```bash\ncat <<'EOF' > /testbed/review_implementation.py\n#!/usr/bin/env python\n\"\"\"Review the implementation.\"\"\"\nimport sys\nsys.path.insert(0, '/testbed')\n\nfrom django.core.mail.utils import punycode_domain\n\nprint(\"IMPLEMENTATION REVIEW\")\nprint(\"=\" * 70)\n\nprint(\"\\n1. Testing punycode_domain function behavior:\")\nprint(\"-\" * 70)\n\n# Test various inputs\ntest_inputs = [\n    \"example.com\",\n    \"localhost\", \n    \"\",\n    123,  # Non-string input\n]\n\nfor inp in test_inputs:\n    result = punycode_domain(inp)\n    print(f\"Input: {repr(inp):20} -> Output: {repr(result)}\")\n\nprint(\"\\n2. Verifying defensive handling:\")\nprint(\"-\" * 70)\n\n# Test that non-string inputs are handled\nresult = punycode_domain(123)\nprint(f\"Non-string input (123) returns: {repr(result)}\")\nprint(f\"Type: {type(result)}\")\n\nprint(\"\\n3. Verifying IDNA encoding:\")\nprint(\"-\" * 70)\n\n# These should be converted to punycode\nunicode_domains = [\"\u6f22\u5b57\", \"\u6b63\u5b97\", \"test.\u6f22\u5b57.com\"]\nfor domain in unicode_domains:\n    result = punycode_domain(domain)\n    print(f\"Unicode domain converted: {result}\")\n    # Verify it's ASCII\n    try:\n        result.encode('ascii')\n        print(f\"  -> ASCII-safe: YES\")\n    except UnicodeEncodeError:\n        print(f\"  -> ASCII-safe: NO (ERROR!)\")\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"IMPLEMENTATION REVIEW COMPLETE\")\nprint(\"=\" * 70)\nEOF\npython /testbed/review_implementation.py\n```",
-    "reward": 0.19439999999999996
+    "reward": 0.45519999999999994
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The implementation is solid and handles all edge cases properly. Let me now clean up the test files I created and prepare for final submission. Let me verify the changes one more time:\n\n```bash\necho \"=== Summary of Changes ===\" && echo && echo \"1. Modified files:\" && echo \"   - /testbed/django/core/mail/utils.py\" && echo \"   - /testbed/django/core/mail/message.py\" && echo && echo \"2. Key changes:\" && echo \"   - Added punycode_domain() helper function in utils.py\" && echo \"   - Modified CachedDnsName.get_fqdn() to return ASCII-encoded domain\" && echo \"   - Updated message.py to use punycode_domain() when creating Message-ID\" && echo && echo \"3. Testing results:\" && echo \"   - All 162 Django mail tests pass\" && echo \"   - PR scenario works correctly\" && echo \"   - Edge cases handled properly\"\n```",
-    "reward": 0.32399999999999995
+    "reward": 0.592
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me verify the exact changes that will be submitted by checking the git diff:\n\n```bash\ncd /testbed && git diff django/core/mail/utils.py django/core/mail/message.py\n```",
-    "reward": 0.5399999999999999
+    "reward": 0.82
   },
   {
     "role": "user",
@@ -396,7 +396,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The changes are clean and minimal. Let me run one final test to ensure everything still works correctly with the Django mail test suite:\n\n```bash\ncd /testbed && python tests/runtests.py mail --verbosity=1 2>&1 | tail -20\n```",
-    "reward": 0.8999999999999999
+    "reward": 1.2
   },
   {
     "role": "user",

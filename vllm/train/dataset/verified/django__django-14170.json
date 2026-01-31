@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the PR description - specifically YearLookup and ExtractIsoYear.\n\n```bash\nfind /testbed -type f -name \"*.py\" | grep -E \"(datetime|lookup)\" | head -20\n```",
-    "reward": 0.0021702104957583355
+    "reward": 0.2521682361702007
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me search more specifically for the datetime functions file mentioned in the PR description.\n\n```bash\nfind /testbed -type f -path \"*/db/models/functions/datetime.py\"\n```",
-    "reward": 0.0036170174929305594
+    "reward": 0.2536137269503345
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now let me examine this file to understand the current implementation of ExtractIsoYear and YearLookup.\n\n```bash\ncat /testbed/django/db/models/functions/datetime.py\n```",
-    "reward": 0.006028362488217599
+    "reward": 0.25602287825055753
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me look at the middle section of the file where the lookup registrations are likely to be. I'll search for the specific registrations mentioned in the PR.\n\n```bash\ngrep -n \"register_lookup\" /testbed/django/db/models/functions/datetime.py\n```",
-    "reward": 0.010047270813695998
+    "reward": 0.2600381304175959
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see the issue. Lines 167-171 register YearLookup optimizations (YearExact, YearGt, YearGte, YearLt, YearLte) for ExtractIsoYear, which is incorrect. These optimizations use BETWEEN with calendar year boundaries, which don't align with ISO year boundaries. Let me view those specific lines to confirm.\n\n```bash\nsed -n '160,172p' /testbed/django/db/models/functions/datetime.py\n```",
-    "reward": 0.01674545135616
+    "reward": 0.2667302173626598
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me understand what these YearLookup classes do by examining the lookups module.\n\n```bash\nfind /testbed -type f -path \"*/db/models/lookups.py\" -exec head -200 {} \\;\n```",
-    "reward": 0.0279090855936
+    "reward": 0.27788369560443293
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me search specifically for the YearLookup classes in the lookups.py file.\n\n```bash\ngrep -n \"class Year\" /testbed/django/db/models/lookups.py\n```",
-    "reward": 0.046515142656
+    "reward": 0.29647282600738817
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me examine the YearLookup class to understand what optimization it performs.\n\n```bash\nsed -n '540,600p' /testbed/django/db/models/lookups.py\n```",
-    "reward": 0.07752523776
+    "reward": 0.32745471001231363
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now I understand the issue. The YearLookup class uses `year_lookup_bounds` which returns calendar year boundaries (e.g., 2020-01-01 to 2020-12-31). This optimization is correct for regular calendar years but incorrect for ISO years, where the year boundaries don't align with calendar dates.\n\nFor example, ISO year 2020 starts on 2019-12-30 (Monday) and ends on 2021-01-03 (Sunday), not on 2020-01-01 to 2020-12-31.\n\nNow let me create a test script to reproduce the issue before making the fix.\n\n```bash\ncat > /testbed/test_iso_year_issue.py << 'EOF'\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=False,\n    )\n    django.setup()\n\nfrom django.db import models, connection\nfrom django.db.models.functions import ExtractIsoYear\n\n# Create a test model\nclass DTModel(models.Model):\n    start_date = models.DateField()\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Create the table\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(DTModel)\n\n# Test 1: Annotation with ExtractIsoYear (should use EXTRACT)\nprint(\"Test 1: Annotation with ExtractIsoYear\")\nqs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).only('id')\nprint(f\"Query: {qs.query}\")\nprint()\n\n# Test 2: Filter using annotated field (should use EXTRACT, not BETWEEN)\nprint(\"Test 2: Filter using annotated field\")\nqs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).filter(extracted=2020).only('id')\nprint(f\"Query: {qs.query}\")\nexpected = \"EXTRACT\"\nactual = str(qs.query)\nif \"BETWEEN\" in actual:\n    print(\"\u274c FAIL: Query uses BETWEEN instead of EXTRACT\")\nelse:\n    print(\"\u2713 PASS: Query uses EXTRACT\")\nprint()\n\n# Test 3: Direct lookup with __iso_year (should use EXTRACT, not BETWEEN)\nprint(\"Test 3: Direct lookup with __iso_year\")\nqs = DTModel.objects.filter(start_date__iso_year=2020).only('id')\nprint(f\"Query: {qs.query}\")\nactual = str(qs.query)\nif \"BETWEEN\" in actual:\n    print(\"\u274c FAIL: Query uses BETWEEN instead of EXTRACT\")\nelse:\n    print(\"\u2713 PASS: Query uses EXTRACT\")\nprint()\n\n# Test 4: Verify regular year still uses BETWEEN optimization\nprint(\"Test 4: Regular year lookup (should still use BETWEEN)\")\nqs = DTModel.objects.filter(start_date__year=2020).only('id')\nprint(f\"Query: {qs.query}\")\nactual = str(qs.query)\nif \"BETWEEN\" in actual:\n    print(\"\u2713 PASS: Query uses BETWEEN optimization for regular year\")\nelse:\n    print(\"\u274c FAIL: Query doesn't use BETWEEN for regular year\")\nprint()\n\n# Test 5: Test boundary case - dates at year boundaries\nprint(\"Test 5: Boundary case test\")\nprint(\"ISO year 2020 starts on Monday 2019-12-30 and ends on Sunday 2021-01-03\")\nprint(\"Calendar year 2020 is 2020-01-01 to 2020-12-31\")\nprint()\n\n# Insert test data\nfrom datetime import date\nDTModel.objects.create(start_date=date(2019, 12, 30))  # ISO year 2020, calendar year 2019\nDTModel.objects.create(start_date=date(2020, 1, 1))    # ISO year 2020, calendar year 2020\nDTModel.objects.create(start_date=date(2020, 12, 31))  # ISO year 2020, calendar year 2020\nDTModel.objects.create(start_date=date(2021, 1, 3))    # ISO year 2020, calendar year 2021\n\n# Query with iso_year\nresults = list(DTModel.objects.filter(start_date__iso_year=2020).values_list('start_date', flat=True))\nprint(f\"Results for iso_year=2020: {results}\")\nprint(f\"Count: {len(results)}\")\n\n# Expected: all 4 dates should be returned (2019-12-30, 2020-01-01, 2020-12-31, 2021-01-03)\n# If BETWEEN is used incorrectly, only 2020-01-01 and 2020-12-31 will be returned\nif len(results) == 4:\n    print(\"\u2713 PASS: All dates in ISO year 2020 returned\")\nelse:\n    print(f\"\u274c FAIL: Expected 4 dates, got {len(results)}\")\n    print(\"This confirms the bug: BETWEEN uses calendar year boundaries instead of ISO year\")\nEOF\npython /testbed/test_iso_year_issue.py\n```",
-    "reward": 0.12920872960000002
+    "reward": 0.379091183353856
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The test confirms the bug. The issue is clear:\n1. When using `__iso_year` lookup, it incorrectly uses BETWEEN with calendar year boundaries (2020-01-01 to 2020-12-31)\n2. This misses dates like 2019-12-30 and 2021-01-03 which are actually part of ISO year 2020\n3. The fix is to remove the YearLookup registrations for ExtractIsoYear (lines 167-171)\n\nNow let me apply the fix by removing those 5 lines.\n\n```bash\nsed -i '167,171d' /testbed/django/db/models/functions/datetime.py\n```",
-    "reward": 0.048681216
+    "reward": 0.29848530558976
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me verify the fix was applied correctly by checking the file around those lines.\n\n```bash\nsed -n '160,175p' /testbed/django/db/models/functions/datetime.py\n```",
-    "reward": 0.08113536
+    "reward": 0.3308088426496
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix has been applied. The ExtractIsoYear.register_lookup lines have been removed, while the ExtractYear.register_lookup lines remain intact. Now let me run the test script again to verify the fix works.\n\n```bash\npython /testbed/test_iso_year_issue.py\n```",
-    "reward": 0.1352256
+    "reward": 0.38468140441599996
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works perfectly. Now let me test comparison operators (__gt, __gte, __lt, __lte) to ensure they also work correctly with iso_year.\n\n```bash\ncat > /testbed/test_iso_year_comparisons.py << 'EOF'\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=False,\n    )\n    django.setup()\n\nfrom django.db import models, connection\nfrom datetime import date\n\n# Create a test model\nclass DTModel(models.Model):\n    start_date = models.DateField()\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Create the table\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(DTModel)\n\n# Insert test data spanning multiple ISO years\nDTModel.objects.create(start_date=date(2018, 12, 31))  # ISO year 2019\nDTModel.objects.create(start_date=date(2019, 12, 30))  # ISO year 2020\nDTModel.objects.create(start_date=date(2020, 6, 15))   # ISO year 2020\nDTModel.objects.create(start_date=date(2021, 1, 3))    # ISO year 2020\nDTModel.objects.create(start_date=date(2021, 1, 4))    # ISO year 2021\n\nprint(\"Test data:\")\nfor obj in DTModel.objects.all().order_by('start_date'):\n    print(f\"  {obj.start_date}\")\nprint()\n\n# Test __gt\nprint(\"Test 1: __iso_year__gt=2019\")\nqs = DTModel.objects.filter(start_date__iso_year__gt=2019)\nprint(f\"Query: {qs.query}\")\nresults = list(qs.values_list('start_date', flat=True))\nprint(f\"Results: {results}\")\nif \"BETWEEN\" not in str(qs.query):\n    print(\"\u2713 PASS: Uses EXTRACT, not BETWEEN\")\nelse:\n    print(\"\u274c FAIL: Uses BETWEEN\")\nprint()\n\n# Test __gte\nprint(\"Test 2: __iso_year__gte=2020\")\nqs = DTModel.objects.filter(start_date__iso_year__gte=2020)\nprint(f\"Query: {qs.query}\")\nresults = list(qs.values_list('start_date', flat=True))\nprint(f\"Results: {results}\")\nif \"BETWEEN\" not in str(qs.query):\n    print(\"\u2713 PASS: Uses EXTRACT, not BETWEEN\")\nelse:\n    print(\"\u274c FAIL: Uses BETWEEN\")\nprint()\n\n# Test __lt\nprint(\"Test 3: __iso_year__lt=2021\")\nqs = DTModel.objects.filter(start_date__iso_year__lt=2021)\nprint(f\"Query: {qs.query}\")\nresults = list(qs.values_list('start_date', flat=True))\nprint(f\"Results: {results}\")\nif \"BETWEEN\" not in str(qs.query):\n    print(\"\u2713 PASS: Uses EXTRACT, not BETWEEN\")\nelse:\n    print(\"\u274c FAIL: Uses BETWEEN\")\nprint()\n\n# Test __lte\nprint(\"Test 4: __iso_year__lte=2020\")\nqs = DTModel.objects.filter(start_date__iso_year__lte=2020)\nprint(f\"Query: {qs.query}\")\nresults = list(qs.values_list('start_date', flat=True))\nprint(f\"Results: {results}\")\nif \"BETWEEN\" not in str(qs.query):\n    print(\"\u2713 PASS: Uses EXTRACT, not BETWEEN\")\nelse:\n    print(\"\u274c FAIL: Uses BETWEEN\")\nprint()\n\n# Verify regular year comparisons still use optimization\nprint(\"Test 5: Regular __year__gt=2019 (should use BETWEEN)\")\nqs = DTModel.objects.filter(start_date__year__gt=2019)\nprint(f\"Query: {qs.query}\")\nif \"BETWEEN\" in str(qs.query) or \">=\" in str(qs.query):\n    print(\"\u2713 PASS: Uses optimization\")\nelse:\n    print(\"\u274c FAIL: Doesn't use optimization\")\nEOF\npython /testbed/test_iso_year_comparisons.py\n```",
-    "reward": 0.225376
+    "reward": 0.47446900736
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The iso_year comparisons are working correctly now. The last test shows that regular year comparisons are using `>` instead of BETWEEN, which is actually correct for __gt. Let me verify that __year (exact match) still uses BETWEEN optimization.\n\n```bash\ncat > /testbed/test_year_optimization.py << 'EOF'\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=False,\n    )\n    django.setup()\n\nfrom django.db import models, connection\n\n# Create a test model\nclass DTModel(models.Model):\n    start_date = models.DateField()\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Create the table\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(DTModel)\n\n# Test that regular year exact match uses BETWEEN\nprint(\"Test: Regular __year=2020 (should use BETWEEN)\")\nqs = DTModel.objects.filter(start_date__year=2020)\nprint(f\"Query: {qs.query}\")\nif \"BETWEEN\" in str(qs.query):\n    print(\"\u2713 PASS: Uses BETWEEN optimization for exact year match\")\nelse:\n    print(\"\u274c FAIL: Doesn't use BETWEEN\")\nprint()\n\n# Test that iso_year exact match uses EXTRACT\nprint(\"Test: __iso_year=2020 (should use EXTRACT)\")\nqs = DTModel.objects.filter(start_date__iso_year=2020)\nprint(f\"Query: {qs.query}\")\nif \"BETWEEN\" not in str(qs.query) and \"django_date_extract\" in str(qs.query):\n    print(\"\u2713 PASS: Uses EXTRACT, not BETWEEN\")\nelse:\n    print(\"\u274c FAIL: Incorrect query\")\nEOF\npython /testbed/test_year_optimization.py\n```",
-    "reward": 0.20896
+    "reward": 0.4574483456
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix is working correctly:\n1. Regular `__year` exact match still uses BETWEEN optimization (correct)\n2. ISO year `__iso_year` now uses EXTRACT instead of BETWEEN (fixed)\n3. All comparison operators work correctly for iso_year\n\nNow let me test with DateTimeField as well to ensure the fix works for both DateField and DateTimeField.\n\n```bash\ncat > /testbed/test_datetime_iso_year.py << 'EOF'\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=False,\n    )\n    django.setup()\n\nfrom django.db import models, connection\nfrom datetime import datetime\n\n# Create a test model with DateTimeField\nclass DTModel(models.Model):\n    start_datetime = models.DateTimeField()\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Create the table\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(DTModel)\n\n# Insert test data\nDTModel.objects.create(start_datetime=datetime(2019, 12, 30, 12, 0))  # ISO year 2020\nDTModel.objects.create(start_datetime=datetime(2020, 1, 1, 12, 0))    # ISO year 2020\nDTModel.objects.create(start_datetime=datetime(2020, 12, 31, 12, 0))  # ISO year 2020\nDTModel.objects.create(start_datetime=datetime(2021, 1, 3, 12, 0))    # ISO year 2020\nDTModel.objects.create(start_datetime=datetime(2021, 1, 4, 12, 0))    # ISO year 2021\n\nprint(\"Test 1: DateTimeField with __iso_year=2020\")\nqs = DTModel.objects.filter(start_datetime__iso_year=2020)\nprint(f\"Query: {qs.query}\")\nresults = list(qs.values_list('start_datetime', flat=True))\nprint(f\"Results count: {len(results)}\")\nprint(f\"Results: {results}\")\n\nif \"BETWEEN\" not in str(qs.query):\n    print(\"\u2713 PASS: Uses EXTRACT, not BETWEEN\")\nelse:\n    print(\"\u274c FAIL: Uses BETWEEN\")\n\nif len(results) == 4:\n    print(\"\u2713 PASS: Correct number of results (4)\")\nelse:\n    print(f\"\u274c FAIL: Expected 4 results, got {len(results)}\")\nprint()\n\nprint(\"Test 2: DateTimeField with regular __year=2020 (should use BETWEEN)\")\nqs = DTModel.objects.filter(start_datetime__year=2020)\nprint(f\"Query: {qs.query}\")\nif \"BETWEEN\" in str(qs.query):\n    print(\"\u2713 PASS: Uses BETWEEN optimization\")\nelse:\n    print(\"\u274c FAIL: Doesn't use BETWEEN\")\nEOF\npython /testbed/test_datetime_iso_year.py\n```",
-    "reward": 0.1816
+    "reward": 0.429080576
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works correctly for both DateField and DateTimeField. Now let me run a comprehensive edge case test to ensure the fix handles various ISO year boundary scenarios correctly.\n\n```bash\ncat > /testbed/test_iso_year_edge_cases.py << 'EOF'\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=False,\n    )\n    django.setup()\n\nfrom django.db import models, connection\nfrom datetime import date\n\n# Create a test model\nclass DTModel(models.Model):\n    start_date = models.DateField()\n    \n    class Meta:\n        app_label = 'test_app'\n\n# Create the table\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(DTModel)\n\n# Test various ISO year boundaries\ntest_cases = [\n    # ISO year 2015 (starts 2014-12-29, ends 2016-01-03)\n    (date(2014, 12, 28), 2014, \"Last day of ISO 2014\"),\n    (date(2014, 12, 29), 2015, \"First day of ISO 2015\"),\n    (date(2015, 12, 31), 2015, \"Last day of calendar 2015, still ISO 2015\"),\n    (date(2016, 1, 3), 2015, \"Last day of ISO 2015\"),\n    (date(2016, 1, 4), 2016, \"First day of ISO 2016\"),\n    \n    # ISO year 2020 (starts 2019-12-30, ends 2021-01-03)\n    (date(2019, 12, 29), 2019, \"Last day of ISO 2019\"),\n    (date(2019, 12, 30), 2020, \"First day of ISO 2020\"),\n    (date(2020, 12, 31), 2020, \"Last day of calendar 2020, still ISO 2020\"),\n    (date(2021, 1, 3), 2020, \"Last day of ISO 2020\"),\n    (date(2021, 1, 4), 2021, \"First day of ISO 2021\"),\n]\n\nprint(\"Testing ISO year boundary cases:\")\nprint(\"=\" * 80)\n\nall_passed = True\nfor test_date, expected_iso_year, description in test_cases:\n    # Clear previous data\n    DTModel.objects.all().delete()\n    \n    # Insert test date\n    DTModel.objects.create(start_date=test_date)\n    \n    # Query for the expected ISO year\n    results = DTModel.objects.filter(start_date__iso_year=expected_iso_year)\n    count = results.count()\n    \n    # Check if the date was found\n    if count == 1:\n        status = \"\u2713 PASS\"\n    else:\n        status = \"\u274c FAIL\"\n        all_passed = False\n    \n    print(f\"{status}: {test_date} - {description}\")\n    print(f\"         Expected ISO year: {expected_iso_year}, Found: {count == 1}\")\n    \n    # Also verify it's NOT found in other years\n    other_year = expected_iso_year + 1\n    other_results = DTModel.objects.filter(start_date__iso_year=other_year)\n    if other_results.count() == 0:\n        print(f\"         \u2713 Correctly NOT in ISO year {other_year}\")\n    else:\n        print(f\"         \u274c Incorrectly found in ISO year {other_year}\")\n        all_passed = False\n    print()\n\nprint(\"=\" * 80)\nif all_passed:\n    print(\"\u2713 ALL TESTS PASSED\")\nelse:\n    print(\"\u274c SOME TESTS FAILED\")\nEOF\npython /testbed/test_iso_year_edge_cases.py\n```",
-    "reward": 0.136
+    "reward": 0.38180095999999997
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All edge cases pass. Now let me verify that the change I made is minimal and correct by reviewing the exact changes.\n\n```bash\ncd /testbed && git diff django/db/models/functions/datetime.py\n```",
-    "reward": 0.06
+    "reward": 0.3030016
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The change is minimal and correct - exactly 5 lines removed that were registering the incorrect YearLookup optimizations for ExtractIsoYear. The ExtractYear registrations remain intact, preserving the BETWEEN optimization for regular calendar years.\n\nNow let me create one final comprehensive test to demonstrate the fix addresses all aspects mentioned in the PR description.\n\n```bash\ncat > /testbed/test_pr_requirements.py << 'EOF'\n\"\"\"\nTest that verifies the fix for the PR:\n\"Query optimization in YearLookup breaks filtering by '__iso_year'\"\n\nThis test demonstrates that:\n1. ExtractIsoYear annotation works correctly (uses EXTRACT)\n2. Filtering with annotated iso_year field uses EXTRACT, not BETWEEN\n3. Direct __iso_year lookup uses EXTRACT, not BETWEEN\n4. Regular __year lookup still uses BETWEEN optimization\n5. ISO year boundaries are handled correctly\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=False,\n    )\n    django.setup()\n\nfrom django.db import models, connection\nfrom django.db.models.functions import ExtractIsoYear\nfrom datetime import date\n\n# Create a test model\nclass DTModel(models.Model):\n    start_date = models.DateField()\n    \n    class Meta:\n        app_label = 'db_functions_dtmodel'\n\n# Create the table\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(DTModel)\n\nprint(\"=\" * 80)\nprint(\"Testing PR Fix: Query optimization in YearLookup breaks filtering by '__iso_year'\")\nprint(\"=\" * 80)\nprint()\n\n# Test 1: annotation works (from PR description)\nprint(\"Test 1: Annotation with ExtractIsoYear works\")\nqs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).only('id')\nquery_str = str(qs.query)\nprint(f\"Query: {query_str}\")\nif 'iso_year' in query_str.lower() or 'isoyear' in query_str.lower():\n    print(\"\u2713 PASS: Uses ISO year extraction\")\nelse:\n    print(\"\u274c FAIL: Doesn't use ISO year extraction\")\nprint()\n\n# Test 2: explicit annotation used in filter does not use BETWEEN (from PR description)\nprint(\"Test 2: Explicit annotation used in filter should use EXTRACT, not BETWEEN\")\nqs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).filter(extracted=2020).only('id')\nquery_str = str(qs.query)\nprint(f\"Query: {query_str}\")\nif \"BETWEEN\" in query_str:\n    print(\"\u274c FAIL: Incorrectly uses BETWEEN\")\nelse:\n    print(\"\u2713 PASS: Uses EXTRACT, not BETWEEN\")\nprint()\n\n# Test 3: implicit lookup uses EXTRACT, not BETWEEN (from PR description)\nprint(\"Test 3: Implicit __iso_year lookup should use EXTRACT, not BETWEEN\")\nqs = DTModel.objects.filter(start_date__iso_year=2020).only('id')\nquery_str = str(qs.query)\nprint(f\"Query: {query_str}\")\nif \"BETWEEN\" in query_str:\n    print(\"\u274c FAIL: Incorrectly uses BETWEEN\")\nelse:\n    print(\"\u2713 PASS: Uses EXTRACT, not BETWEEN\")\nprint()\n\n# Test 4: Verify correct data is returned\nprint(\"Test 4: Correct data is returned for ISO year boundaries\")\nprint(\"ISO year 2020 spans from 2019-12-30 (Monday) to 2021-01-03 (Sunday)\")\n\n# Clear and insert test data\nDTModel.objects.all().delete()\nDTModel.objects.create(start_date=date(2019, 12, 29))  # ISO year 2019\nDTModel.objects.create(start_date=date(2019, 12, 30))  # ISO year 2020\nDTModel.objects.create(start_date=date(2020, 1, 1))    # ISO year 2020\nDTModel.objects.create(start_date=date(2020, 12, 31))  # ISO year 2020\nDTModel.objects.create(start_date=date(2021, 1, 3))    # ISO year 2020\nDTModel.objects.create(start_date=date(2021, 1, 4))    # ISO year 2021\n\nresults = list(DTModel.objects.filter(start_date__iso_year=2020).values_list('start_date', flat=True))\nprint(f\"Dates in ISO year 2020: {results}\")\nprint(f\"Count: {len(results)}\")\n\nexpected_dates = [\n    date(2019, 12, 30),\n    date(2020, 1, 1),\n    date(2020, 12, 31),\n    date(2021, 1, 3),\n]\n\nif len(results) == 4 and all(d in results for d in expected_dates):\n    print(\"\u2713 PASS: All correct dates returned\")\nelse:\n    print(\"\u274c FAIL: Incorrect dates returned\")\nprint()\n\n# Test 5: Regular year still uses optimization\nprint(\"Test 5: Regular __year lookup still uses BETWEEN optimization\")\nqs = DTModel.objects.filter(start_date__year=2020).only('id')\nquery_str = str(qs.query)\nprint(f\"Query: {query_str}\")\nif \"BETWEEN\" in query_str:\n    print(\"\u2713 PASS: Uses BETWEEN optimization for regular year\")\nelse:\n    print(\"\u274c FAIL: Doesn't use BETWEEN for regular year\")\nprint()\n\nprint(\"=\" * 80)\nprint(\"All tests completed successfully!\")\nprint(\"The fix correctly removes YearLookup optimization from ExtractIsoYear\")\nprint(\"while preserving it for ExtractYear.\")\nprint(\"=\" * 80)\nEOF\npython /testbed/test_pr_requirements.py\n```",
-    "reward": 0.1
+    "reward": 0.338336
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. The fix is working correctly and addresses all the issues mentioned in the PR description. Let me now check if there are any existing Django tests that might be affected by this change, particularly in the db_functions tests.\n\n```bash\nfind /testbed/tests -type f -name \"*.py\" -path \"*/db_functions/*\" | head -10\n```",
-    "reward": 0.0
+    "reward": 0.23056000000000001
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the extract_trunc test file since it's most likely to have tests related to ExtractIsoYear.\n\n```bash\ngrep -n \"iso_year\" /testbed/tests/db_functions/datetime/test_extract_trunc.py | head -20\n```",
-    "reward": 0.0
+    "reward": 0.21760000000000002
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me look at the test_extract_iso_year_func_boundaries test to see what it's testing.\n\n```bash\nsed -n '350,380p' /testbed/tests/db_functions/datetime/test_extract_trunc.py\n```",
-    "reward": 0.0
+    "reward": 0.196
   },
   {
     "role": "user",
@@ -312,7 +312,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the tests that iterate over 'year' and 'iso_year' to see if they might be affected by the fix.\n\n```bash\nsed -n '106,170p' /testbed/tests/db_functions/datetime/test_extract_trunc.py\n```",
-    "reward": 0.0
+    "reward": 0.16
   },
   {
     "role": "user",
@@ -329,7 +329,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I can see that the existing tests expect BETWEEN to be used for iso_year lookups, which is the bug we're fixing. These tests are incorrect and need to be updated. However, according to the instructions, I should NOT modify test files. The PR description mentions that the tests need to be reverted to correct expectations.\n\nLet me verify my fix is complete and correct by reviewing what I've done:\n\n1. \u2705 Removed the 5 YearLookup registrations for ExtractIsoYear\n2. \u2705 Kept the YearLookup registrations for ExtractYear intact\n3. \u2705 Verified iso_year now uses EXTRACT instead of BETWEEN\n4. \u2705 Verified regular year still uses BETWEEN optimization\n5. \u2705 Tested edge cases and boundary conditions\n6. \u2705 Tested both DateField and DateTimeField\n7. \u2705 Tested all comparison operators\n\nThe fix is complete and correct. Now let me prepare the final submission.\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 0.1
   },
   {
     "role": "user",

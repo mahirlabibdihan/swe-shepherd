@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files for marker handling in pytest.\n\n```bash\nfind /testbed -type f -name \"*.py\" | grep -E \"(mark|structures)\" | head -20\n```",
-    "reward": 0.10185618079926778
+    "reward": 0.38185612553078785
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I can see the mark-related files. Based on the previous attempt analysis, the key files are `src/_pytest/mark/structures.py` which contains `get_unpacked_marks` and `store_mark` functions. Let me examine this file first.\n\n```bash\ncat /testbed/src/_pytest/mark/structures.py\n```",
-    "reward": 0.16976030133211298
+    "reward": 0.4697602092179798
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The file is quite long. Let me search for the specific functions mentioned in the previous attempt: `get_unpacked_marks` and `store_mark`.\n\n```bash\ngrep -n \"def get_unpacked_marks\\|def store_mark\" /testbed/src/_pytest/mark/structures.py\n```",
-    "reward": 0.03293383555352164
+    "reward": 0.28293368202996627
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the two key functions at lines 358 and 383. Let me view these functions and their surrounding context.\n\n```bash\nsed -n '358,410p' /testbed/src/_pytest/mark/structures.py\n```",
-    "reward": 0.05488972592253607
+    "reward": 0.30488947004994377
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see the current implementation of `get_unpacked_marks` and `store_mark`. Now let me create a test script to reproduce the issue described in the PR.\n\n```bash\ncat <<'EOF' > /testbed/test_reproduce_issue.py\nimport pytest\n\n@pytest.mark.foo\nclass Foo:\n    pass\n\n@pytest.mark.bar\nclass Bar:\n    pass\n\nclass TestDings(Foo, Bar):\n    def test_dings(self):\n        # This test should have both markers, foo and bar.\n        pass\n\nif __name__ == \"__main__\":\n    # Get the marks on the test method\n    from _pytest.mark.structures import get_unpacked_marks\n    \n    marks = list(get_unpacked_marks(TestDings))\n    print(f\"Marks on TestDings class: {[m.name for m in marks]}\")\n    \n    marks_on_test = list(get_unpacked_marks(TestDings.test_dings))\n    print(f\"Marks on test_dings method: {[m.name for m in marks_on_test]}\")\n    \n    # Check what pytestmark looks like on each class\n    print(f\"\\nFoo.pytestmark: {getattr(Foo, 'pytestmark', None)}\")\n    print(f\"Bar.pytestmark: {getattr(Bar, 'pytestmark', None)}\")\n    print(f\"TestDings.pytestmark: {getattr(TestDings, 'pytestmark', None)}\")\n    \n    # Check MRO\n    print(f\"\\nTestDings MRO: {[c.__name__ for c in TestDings.__mro__]}\")\n    \n    # Expected: both 'foo' and 'bar' marks\n    # Actual: only 'foo' mark (from first base class in MRO)\n    expected_marks = {'foo', 'bar'}\n    actual_marks = {m.name for m in marks}\n    \n    if expected_marks == actual_marks:\n        print(\"\\n\u2713 SUCCESS: Both marks are present!\")\n    else:\n        print(f\"\\n\u2717 FAILURE: Expected {expected_marks}, got {actual_marks}\")\n        print(f\"Missing marks: {expected_marks - actual_marks}\")\nEOF\n```",
-    "reward": 0.09148287653756011
+    "reward": 0.34148245008323963
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this test script to confirm the issue exists.\n\n```bash\ncd /testbed && python test_reproduce_issue.py\n```",
-    "reward": -0.01419520577073316
+    "reward": 0.2358040834720661
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I've confirmed the issue. The problem is that `get_unpacked_marks` uses `getattr(obj, \"pytestmark\", [])` which follows Python's MRO and only returns the first `pytestmark` attribute it finds (from `Foo`), missing the `bar` mark from `Bar`.\n\nAccording to the previous attempt analysis, the fix should:\n1. Modify `get_unpacked_marks` to iterate through the MRO for classes and collect marks from each class using `__dict__.get()` to avoid inheritance\n2. Modify `store_mark` to use `__dict__.get()` for classes to avoid pulling in inherited marks when storing a new mark\n\nLet me implement the fix:\n\n```bash\ncat <<'EOF' > /tmp/fix_marks.py\nimport sys\n\n# Read the file\nwith open('/testbed/src/_pytest/mark/structures.py', 'r') as f:\n    content = f.read()\n\n# Replace get_unpacked_marks function\nold_get_unpacked_marks = '''def get_unpacked_marks(obj: object) -> Iterable[Mark]:\n    \"\"\"Obtain the unpacked marks that are stored on an object.\"\"\"\n    mark_list = getattr(obj, \"pytestmark\", [])\n    if not isinstance(mark_list, list):\n        mark_list = [mark_list]\n    return normalize_mark_list(mark_list)'''\n\nnew_get_unpacked_marks = '''def get_unpacked_marks(obj: object) -> Iterable[Mark]:\n    \"\"\"Obtain the unpacked marks that are stored on an object.\n    \n    For classes, this will collect marks from all classes in the MRO\n    to properly handle multiple inheritance scenarios.\n    \"\"\"\n    # For classes, collect marks from all classes in MRO\n    if inspect.isclass(obj):\n        mark_lists = []\n        for klass in obj.__mro__:\n            # Use __dict__.get to get marks directly defined on this class\n            # (not inherited), avoiding duplication\n            mark_list = klass.__dict__.get(\"pytestmark\", [])\n            if not isinstance(mark_list, list):\n                mark_list = [mark_list]\n            mark_lists.extend(mark_list)\n        return normalize_mark_list(mark_lists)\n    else:\n        # For functions/methods, use the original behavior\n        mark_list = getattr(obj, \"pytestmark\", [])\n        if not isinstance(mark_list, list):\n            mark_list = [mark_list]\n        return normalize_mark_list(mark_list)'''\n\ncontent = content.replace(old_get_unpacked_marks, new_get_unpacked_marks)\n\n# Replace store_mark function\nold_store_mark = '''def store_mark(obj, mark: Mark) -> None:\n    \"\"\"Store a Mark on an object.\n\n    This is used to implement the Mark declarations/decorators correctly.\n    \"\"\"\n    assert isinstance(mark, Mark), mark\n    # Always reassign name to avoid updating pytestmark in a reference that\n    # was only borrowed.\n    obj.pytestmark = [*get_unpacked_marks(obj), mark]'''\n\nnew_store_mark = '''def store_mark(obj, mark: Mark) -> None:\n    \"\"\"Store a Mark on an object.\n\n    This is used to implement the Mark declarations/decorators correctly.\n    \"\"\"\n    assert isinstance(mark, Mark), mark\n    # Always reassign name to avoid updating pytestmark in a reference that\n    # was only borrowed.\n    # For classes, only get marks directly defined on this class to avoid\n    # pulling in inherited marks during decoration\n    if inspect.isclass(obj):\n        mark_list = obj.__dict__.get(\"pytestmark\", [])\n        if not isinstance(mark_list, list):\n            mark_list = [mark_list]\n        obj.pytestmark = [*mark_list, mark]\n    else:\n        obj.pytestmark = [*get_unpacked_marks(obj), mark]'''\n\ncontent = content.replace(old_store_mark, new_store_mark)\n\n# Write the file back\nwith open('/testbed/src/_pytest/mark/structures.py', 'w') as f:\n    f.write(content)\n\nprint(\"Successfully applied the fix!\")\nEOF\n\npython /tmp/fix_marks.py\n```",
-    "reward": -0.023658676284555268
+    "reward": 0.22634013912011017
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me verify the changes were applied correctly by viewing the modified functions.\n\n```bash\nsed -n '358,410p' /testbed/src/_pytest/mark/structures.py\n```",
-    "reward": -0.03943112714092545
+    "reward": 0.21056689853351696
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me see the rest of the store_mark function:\n\n```bash\nsed -n '400,415p' /testbed/src/_pytest/mark/structures.py\n```",
-    "reward": 0.017614788098457596
+    "reward": 0.26761149755586155
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me see a bit more to get the complete function:\n\n```bash\nsed -n '400,420p' /testbed/src/_pytest/mark/structures.py\n```",
-    "reward": 0.029357980164095996
+    "reward": 0.2793524959264359
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The changes look good. Now let me test if the fix works by running my reproduction script again.\n\n```bash\ncd /testbed && python test_reproduce_issue.py\n```",
-    "reward": 0.04892996694016
+    "reward": 0.2989208265440598
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works. Now let me create a more comprehensive test to check edge cases like diamond inheritance, deep inheritance, and marker selection with -m flag.\n\n```bash\ncat <<'EOF' > /testbed/test_comprehensive_marks.py\nimport pytest\nfrom _pytest.mark.structures import get_unpacked_marks\n\n# Test 1: Simple multiple inheritance\n@pytest.mark.foo\nclass Foo:\n    pass\n\n@pytest.mark.bar\nclass Bar:\n    pass\n\nclass TestSimple(Foo, Bar):\n    def test_simple(self):\n        pass\n\n# Test 2: Diamond inheritance\n@pytest.mark.base\nclass Base:\n    pass\n\n@pytest.mark.left\nclass Left(Base):\n    pass\n\n@pytest.mark.right\nclass Right(Base):\n    pass\n\nclass TestDiamond(Left, Right):\n    def test_diamond(self):\n        pass\n\n# Test 3: Deep inheritance\n@pytest.mark.level1\nclass Level1:\n    pass\n\n@pytest.mark.level2\nclass Level2(Level1):\n    pass\n\n@pytest.mark.level3\nclass Level3(Level2):\n    pass\n\nclass TestDeep(Level3):\n    def test_deep(self):\n        pass\n\n# Test 4: Multiple marks on same class\n@pytest.mark.mark1\n@pytest.mark.mark2\nclass MultiMark:\n    pass\n\nclass TestMulti(MultiMark):\n    def test_multi(self):\n        pass\n\n# Test 5: Child class with its own mark\n@pytest.mark.parent\nclass Parent:\n    pass\n\n@pytest.mark.child\nclass TestChild(Parent):\n    def test_child(self):\n        pass\n\ndef check_marks(cls, expected_marks, test_name):\n    marks = list(get_unpacked_marks(cls))\n    actual_marks = {m.name for m in marks}\n    \n    if expected_marks == actual_marks:\n        print(f\"\u2713 {test_name}: SUCCESS - got marks {actual_marks}\")\n        return True\n    else:\n        print(f\"\u2717 {test_name}: FAILURE\")\n        print(f\"  Expected: {expected_marks}\")\n        print(f\"  Got: {actual_marks}\")\n        print(f\"  Missing: {expected_marks - actual_marks}\")\n        print(f\"  Extra: {actual_marks - expected_marks}\")\n        return False\n\nif __name__ == \"__main__\":\n    all_passed = True\n    \n    all_passed &= check_marks(TestSimple, {'foo', 'bar'}, \"Simple multiple inheritance\")\n    all_passed &= check_marks(TestDiamond, {'left', 'right', 'base'}, \"Diamond inheritance\")\n    all_passed &= check_marks(TestDeep, {'level3', 'level2', 'level1'}, \"Deep inheritance\")\n    all_passed &= check_marks(TestMulti, {'mark1', 'mark2'}, \"Multiple marks on same class\")\n    all_passed &= check_marks(TestChild, {'child', 'parent'}, \"Child with own mark\")\n    \n    print(\"\\n\" + \"=\"*50)\n    if all_passed:\n        print(\"ALL TESTS PASSED!\")\n    else:\n        print(\"SOME TESTS FAILED!\")\n    \n    # Also test that marks don't get duplicated when decorating\n    print(\"\\n\" + \"=\"*50)\n    print(\"Testing mark decoration doesn't duplicate inherited marks...\")\n    \n    @pytest.mark.new_mark\n    class TestDecoration(Foo, Bar):\n        pass\n    \n    marks = list(get_unpacked_marks(TestDecoration))\n    mark_names = [m.name for m in marks]\n    print(f\"Marks on TestDecoration: {mark_names}\")\n    \n    # Should have new_mark, foo, and bar (each appearing once)\n    from collections import Counter\n    mark_counts = Counter(mark_names)\n    \n    if all(count == 1 for count in mark_counts.values()):\n        print(\"\u2713 No duplicate marks!\")\n    else:\n        print(f\"\u2717 Found duplicate marks: {[(name, count) for name, count in mark_counts.items() if count > 1]}\")\nEOF\n\npython /testbed/test_comprehensive_marks.py\n```",
-    "reward": 0.1648832782336
+    "reward": 0.41486804424009976
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All comprehensive tests pass. Now let me test with pytest's actual marker selection using the -m flag to ensure the fix works end-to-end with pytest's collection mechanism.\n\n```bash\ncat <<'EOF' > /testbed/test_marker_selection.py\nimport pytest\n\n@pytest.mark.foo\nclass Foo:\n    pass\n\n@pytest.mark.bar\nclass Bar:\n    pass\n\nclass TestBoth(Foo, Bar):\n    def test_should_run_with_foo(self):\n        \"\"\"This should run when selecting -m foo\"\"\"\n        pass\n    \n    def test_should_run_with_bar(self):\n        \"\"\"This should run when selecting -m bar\"\"\"\n        pass\n\nclass TestOnlyFoo(Foo):\n    def test_only_foo(self):\n        \"\"\"This should only run with -m foo\"\"\"\n        pass\n\nclass TestOnlyBar(Bar):\n    def test_only_bar(self):\n        \"\"\"This should only run with -m bar\"\"\"\n        pass\nEOF\n\ncd /testbed && python -m pytest test_marker_selection.py -v -m foo\n```",
-    "reward": 0.108138797056
+    "reward": 0.3581134070668329
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The -m foo selection correctly picks up tests from TestBoth (which inherits from both Foo and Bar). Now let me test with -m bar:\n\n```bash\ncd /testbed && python -m pytest test_marker_selection.py -v -m bar\n```",
-    "reward": 0.013564661759999997
+    "reward": 0.26352234511138817
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Both marker selections work correctly. Now let me run the existing pytest test suite for marks to ensure we haven't broken anything:\n\n```bash\ncd /testbed && python -m pytest testing/test_mark.py -v\n```",
-    "reward": 0.022607769599999997
+    "reward": 0.2725372418523136
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! All tests pass. Now let me run the mark expression tests as well:\n\n```bash\ncd /testbed && python -m pytest testing/test_mark_expression.py -v\n```",
-    "reward": 0.037679616
+    "reward": 0.287562069753856
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All mark expression tests pass. Now let me run a broader set of collection tests to ensure the fix doesn't break anything:\n\n```bash\ncd /testbed && python -m pytest testing/test_collection.py -v -k \"mark\" 2>&1 | head -100\n```",
-    "reward": 0.06279936
+    "reward": 0.31260344958976
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me create one more test to specifically verify the exact scenario from the PR description works correctly:\n\n```bash\ncat <<'EOF' > /testbed/test_pr_scenario.py\n\"\"\"Test the exact scenario from the PR description\"\"\"\nimport pytest\nfrom _pytest.mark.structures import get_unpacked_marks\n\n@pytest.mark.foo\nclass Foo:\n    pass\n\n@pytest.mark.bar\nclass Bar:\n    pass\n\nclass TestDings(Foo, Bar):\n    def test_dings(self):\n        # This test should have both markers, foo and bar.\n        pass\n\nif __name__ == \"__main__\":\n    # Test that TestDings has both markers\n    marks = list(get_unpacked_marks(TestDings))\n    mark_names = {m.name for m in marks}\n    \n    print(f\"Marks on TestDings: {mark_names}\")\n    \n    if mark_names == {'foo', 'bar'}:\n        print(\"\u2713 SUCCESS: Both 'foo' and 'bar' markers are present on TestDings!\")\n    else:\n        print(f\"\u2717 FAILURE: Expected {{'foo', 'bar'}}, got {mark_names}\")\n        exit(1)\n    \n    # Also verify via pytest collection\n    import subprocess\n    result = subprocess.run(\n        ['python', '-m', 'pytest', __file__, '-v', '-m', 'foo'],\n        capture_output=True,\n        text=True\n    )\n    \n    if 'test_dings PASSED' in result.stdout:\n        print(\"\u2713 SUCCESS: test_dings is selected with -m foo\")\n    else:\n        print(\"\u2717 FAILURE: test_dings not selected with -m foo\")\n        print(result.stdout)\n        exit(1)\n    \n    result = subprocess.run(\n        ['python', '-m', 'pytest', __file__, '-v', '-m', 'bar'],\n        capture_output=True,\n        text=True\n    )\n    \n    if 'test_dings PASSED' in result.stdout:\n        print(\"\u2713 SUCCESS: test_dings is selected with -m bar\")\n    else:\n        print(\"\u2717 FAILURE: test_dings not selected with -m bar\")\n        print(result.stdout)\n        exit(1)\n    \n    print(\"\\n\" + \"=\"*60)\n    print(\"ALL CHECKS PASSED! The PR issue is resolved.\")\n    print(\"=\"*60)\nEOF\n\npython /testbed/test_pr_scenario.py\n```",
-    "reward": 0.1046656
+    "reward": 0.3543390826496
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix is working correctly. Now let me verify that the fix doesn't cause any issues with the broader test suite by running a few more test files related to collection and nodes:\n\n```bash\ncd /testbed && python -m pytest testing/test_nodes.py -v -x 2>&1 | head -50\n```",
-    "reward": 0.007775999999999998
+    "reward": 0.257231804416
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! All node tests pass. Let me also check if there are any tests specifically about marker inheritance or multiple inheritance:\n\n```bash\ncd /testbed && grep -r \"multiple.*inherit\\|inherit.*multiple\" testing/ --include=\"*.py\" | head -10\n```",
-    "reward": 0.012959999999999998
+    "reward": 0.26205300736000003
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me search for tests related to marker merging or baseclasses:\n\n```bash\ncd /testbed && grep -r \"baseclasses\\|mark_decorator_baseclasses\" testing/ --include=\"*.py\"\n```",
-    "reward": 0.021599999999999998
+    "reward": 0.2700883456
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me look at that specific test to see if it's related to our fix:\n\n```bash\ncd /testbed && grep -A 30 \"def test_mark_decorator_baseclasses_merged\" testing/test_mark.py\n```",
-    "reward": 0.036
+    "reward": 0.283480576
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: This test is about single inheritance (Base2 inherits from Base, Test1 inherits from Base2). Let me run this specific test to make sure our fix doesn't break it:\n\n```bash\ncd /testbed && python -m pytest testing/test_mark.py::TestFunctional::test_mark_decorator_baseclasses_merged -v\n```",
-    "reward": 0.06
+    "reward": 0.30580096
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Now let me create a final comprehensive test that covers the exact scenario from the PR and some edge cases to ensure everything works:\n\n```bash\ncat <<'EOF' > /testbed/test_final_validation.py\n\"\"\"Final validation test for multiple inheritance marker fix\"\"\"\nimport pytest\nfrom _pytest.mark.structures import get_unpacked_marks\n\n# Test 1: Basic multiple inheritance (from PR description)\n@pytest.mark.foo\nclass Foo:\n    pass\n\n@pytest.mark.bar\nclass Bar:\n    pass\n\nclass TestBasicMultiple(Foo, Bar):\n    def test_basic(self):\n        pass\n\n# Test 2: Diamond inheritance\n@pytest.mark.base\nclass Base:\n    pass\n\n@pytest.mark.left\nclass Left(Base):\n    pass\n\n@pytest.mark.right\nclass Right(Base):\n    pass\n\nclass TestDiamond(Left, Right):\n    def test_diamond(self):\n        pass\n\n# Test 3: Three-way multiple inheritance\n@pytest.mark.a\nclass A:\n    pass\n\n@pytest.mark.b\nclass B:\n    pass\n\n@pytest.mark.c\nclass C:\n    pass\n\nclass TestThreeWay(A, B, C):\n    def test_three_way(self):\n        pass\n\n# Test 4: Child with own marks\n@pytest.mark.parent\nclass Parent:\n    pass\n\n@pytest.mark.child\nclass TestChildWithMark(Parent):\n    def test_child(self):\n        pass\n\n# Test 5: Multiple marks on same class\n@pytest.mark.mark1\n@pytest.mark.mark2\nclass MultiMarked:\n    pass\n\nclass TestMultiMarked(MultiMarked):\n    def test_multi(self):\n        pass\n\n# Test 6: Deep chain\n@pytest.mark.level1\nclass Level1:\n    pass\n\n@pytest.mark.level2\nclass Level2(Level1):\n    pass\n\n@pytest.mark.level3\nclass Level3(Level2):\n    pass\n\nclass TestDeepChain(Level3):\n    def test_deep(self):\n        pass\n\ndef validate_marks(cls, expected_marks, test_name):\n    \"\"\"Helper to validate marks on a class\"\"\"\n    marks = list(get_unpacked_marks(cls))\n    actual_marks = {m.name for m in marks}\n    \n    if expected_marks == actual_marks:\n        print(f\"\u2713 {test_name}: {actual_marks}\")\n        return True\n    else:\n        print(f\"\u2717 {test_name}: Expected {expected_marks}, got {actual_marks}\")\n        return False\n\nif __name__ == \"__main__\":\n    print(\"Validating marker inheritance with MRO...\")\n    print(\"=\" * 60)\n    \n    all_passed = True\n    all_passed &= validate_marks(TestBasicMultiple, {'foo', 'bar'}, \"Basic multiple inheritance\")\n    all_passed &= validate_marks(TestDiamond, {'base', 'left', 'right'}, \"Diamond inheritance\")\n    all_passed &= validate_marks(TestThreeWay, {'a', 'b', 'c'}, \"Three-way multiple inheritance\")\n    all_passed &= validate_marks(TestChildWithMark, {'parent', 'child'}, \"Child with own mark\")\n    all_passed &= validate_marks(TestMultiMarked, {'mark1', 'mark2'}, \"Multiple marks on same class\")\n    all_passed &= validate_marks(TestDeepChain, {'level1', 'level2', 'level3'}, \"Deep inheritance chain\")\n    \n    print(\"=\" * 60)\n    if all_passed:\n        print(\"\u2713 ALL VALIDATION TESTS PASSED!\")\n        exit(0)\n    else:\n        print(\"\u2717 SOME VALIDATION TESTS FAILED!\")\n        exit(1)\nEOF\n\npython /testbed/test_final_validation.py\n```",
-    "reward": 0.1
+    "reward": 0.3430016
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me verify that the fix doesn't break anything by running a broader set of pytest tests. Let me run the full test_mark.py suite one more time to be absolutely sure:\n\n```bash\ncd /testbed && python -m pytest testing/test_mark.py -x\n```",
-    "reward": 0.0
+    "reward": 0.23833600000000002
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Let me also run a quick sanity check on the collection tests to ensure nothing is broken:\n\n```bash\ncd /testbed && python -m pytest testing/test_collection.py -x 2>&1 | tail -20\n```",
-    "reward": 0.0
+    "reward": 0.23056000000000001
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me verify the changes one more time by viewing the modified functions to ensure they're correct:\n\n```bash\nsed -n '358,420p' /testbed/src/_pytest/mark/structures.py\n```",
-    "reward": 0.0
+    "reward": 0.21760000000000002
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The implementation looks correct. Let me clean up the test files I created and then submit the final solution:\n\n```bash\ncd /testbed && rm -f test_reproduce_issue.py test_comprehensive_marks.py test_marker_selection.py test_pr_scenario.py test_final_validation.py /tmp/fix_marks.py\n```",
-    "reward": 0.0
+    "reward": 0.196
   },
   {
     "role": "user",
@@ -410,7 +410,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me create one final test to demonstrate the fix works as expected, then submit:\n\n```bash\ncat <<'EOF' > /testbed/verify_fix.py\n\"\"\"Verification that the fix resolves the issue from the PR\"\"\"\nimport pytest\nfrom _pytest.mark.structures import get_unpacked_marks\n\n@pytest.mark.foo\nclass Foo:\n    pass\n\n@pytest.mark.bar\nclass Bar:\n    pass\n\nclass TestDings(Foo, Bar):\n    def test_dings(self):\n        pass\n\n# Verify the fix\nmarks = list(get_unpacked_marks(TestDings))\nmark_names = {m.name for m in marks}\n\nprint(f\"Marks on TestDings: {mark_names}\")\nassert mark_names == {'foo', 'bar'}, f\"Expected {{'foo', 'bar'}}, got {mark_names}\"\nprint(\"\u2713 Fix verified: Both 'foo' and 'bar' markers are present!\")\nEOF\n\npython /testbed/verify_fix.py && rm /testbed/verify_fix.py\n```",
-    "reward": 0.0
+    "reward": 0.16
   },
   {
     "role": "user",
@@ -427,7 +427,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix is working correctly. Let me now submit the final solution. The changes I made are:\n\n1. Modified `get_unpacked_marks()` in `/testbed/src/_pytest/mark/structures.py` to iterate through the MRO for classes and collect marks from each class using `__dict__.get()` to avoid inheritance and duplication.\n\n2. Modified `store_mark()` in the same file to use `__dict__.get()` for classes to avoid pulling in inherited marks when storing a new mark during decoration.\n\nThese changes ensure that when a test class inherits from multiple base classes with different markers, all markers from all base classes are properly collected and available, fixing the issue described in the PR.\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 0.1
   },
   {
     "role": "user",

@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the PR description and previous attempt.\n\n```bash\nfind /testbed -type f -name \"query.py\" | grep -E \"django/db/models/sql\" | head -5\n```",
-    "reward": 0.0891687291766228
+    "reward": 0.36899093568186925
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the main file. Let me examine the `check_filterable` method in the query.py file to understand the current implementation and the issue.\n\n```bash\nnl -ba /testbed/django/db/models/sql/query.py | grep -A 20 \"def check_filterable\"\n```",
-    "reward": 0.14861454862770468
+    "reward": 0.44831822613644867
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I can see the issue. The `check_filterable` method uses `getattr(expression, 'filterable', True)` which will check for a `filterable` attribute on ANY object, including model instances that have a field named `filterable`. According to the previous attempt analysis, the fix should restrict this check to only `BaseExpression` instances. Let me check what imports are available at the top of the file.\n\n```bash\nhead -50 /testbed/django/db/models/sql/query.py | grep -E \"^import|^from\"\n```",
-    "reward": -0.0023090856204921904
+    "reward": 0.24719704356074768
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see that `BaseExpression` is already imported from `django.db.models.expressions`. Now let me create a reproduction script to verify the issue before making changes.\n\n```bash\ncat <<'EOF' > /testbed/reproduce_issue.py\n\"\"\"\nReproduction script for the filterable field issue.\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=True,\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.utils import timezone\n\n# Define the models from the PR description\nclass ProductMetaDataType(models.Model):\n    label = models.CharField(max_length=255, unique=True, blank=False, null=False)\n    filterable = models.BooleanField(default=False, verbose_name=\"filterable\")\n    \n    class Meta:\n        app_label = \"test_app\"\n        \n    def __str__(self):\n        return self.label\n\nclass ProductMetaData(models.Model):\n    id = models.BigAutoField(primary_key=True)\n    value = models.TextField(null=False, blank=False)\n    metadata_type = models.ForeignKey(\n        ProductMetaDataType, null=False, blank=False, on_delete=models.CASCADE\n    )\n    \n    class Meta:\n        app_label = \"test_app\"\n\n# Create tables\nfrom django.db import connection\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ProductMetaDataType)\n    schema_editor.create_model(ProductMetaData)\n\n# Create test data\nmetadata_type = ProductMetaDataType.objects.create(label=\"Brand\", filterable=True)\nProductMetaData.objects.create(value=\"Dark Vador\", metadata_type=metadata_type)\n\n# Try to filter - this should fail with the bug\ntry:\n    result = ProductMetaData.objects.filter(value=\"Dark Vador\", metadata_type=metadata_type)\n    print(f\"SUCCESS: Query executed successfully, found {result.count()} records\")\n    for item in result:\n        print(f\"  - Value: {item.value}, Metadata Type: {item.metadata_type.label}\")\nexcept Exception as e:\n    print(f\"ERROR: {type(e).__name__}: {e}\")\n    import traceback\n    traceback.print_exc()\nEOF\n```",
-    "reward": -0.003848476034153651
+    "reward": 0.24532840593457944
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script to confirm the issue exists.\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": -0.0064141267235894184
+    "reward": 0.24221400989096573
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Interesting! The script runs successfully. This might mean the issue has already been fixed, or my reproduction script doesn't exactly match the conditions. Let me check the Django version and look more carefully at the traceback in the PR description. The traceback shows the error occurs in `check_filterable` when it checks `getattr(expression, 'filterable', True)`. Let me look at where `check_filterable` is called from.\n\n```bash\nnl -ba /testbed/django/db/models/sql/query.py | grep -B 5 -A 5 \"self.check_filterable\"\n```",
-    "reward": -0.010690211205982365
+    "reward": 0.23702334981827622
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see! The `check_filterable` is called on line 1269 with `value`, which is the RHS (right-hand side) of the filter. In the case of `metadata_type=metadata_type`, the value would be the model instance. Let me check what the current code looks like more carefully and see if there's already a fix in place.\n\n```bash\nnl -ba /testbed/django/db/models/sql/query.py | sed -n '1125,1135p'\n```",
-    "reward": -0.017817018676637274
+    "reward": 0.22837224969712705
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The code still has the bug. Let me create a more specific test that directly tests the issue. The problem is that when a model instance with a `filterable=False` field is passed as the RHS value, the `getattr(expression, 'filterable', True)` will return `False` (the field value), causing the error. Let me create a test that specifically sets `filterable=False`.\n\n```bash\ncat <<'EOF' > /testbed/reproduce_issue2.py\n\"\"\"\nReproduction script for the filterable field issue - with filterable=False.\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=True,\n    )\n    django.setup()\n\nfrom django.db import models\n\n# Define the models from the PR description\nclass ProductMetaDataType(models.Model):\n    label = models.CharField(max_length=255, unique=True, blank=False, null=False)\n    filterable = models.BooleanField(default=False, verbose_name=\"filterable\")\n    \n    class Meta:\n        app_label = \"test_app\"\n        \n    def __str__(self):\n        return self.label\n\nclass ProductMetaData(models.Model):\n    id = models.BigAutoField(primary_key=True)\n    value = models.TextField(null=False, blank=False)\n    metadata_type = models.ForeignKey(\n        ProductMetaDataType, null=False, blank=False, on_delete=models.CASCADE\n    )\n    \n    class Meta:\n        app_label = \"test_app\"\n\n# Create tables\nfrom django.db import connection\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ProductMetaDataType)\n    schema_editor.create_model(ProductMetaData)\n\n# Create test data with filterable=False (this is the key!)\nmetadata_type = ProductMetaDataType.objects.create(label=\"Brand\", filterable=False)\nProductMetaData.objects.create(value=\"Dark Vador\", metadata_type=metadata_type)\n\nprint(f\"Created metadata_type with filterable={metadata_type.filterable}\")\n\n# Try to filter - this should fail with the bug\ntry:\n    result = ProductMetaData.objects.filter(value=\"Dark Vador\", metadata_type=metadata_type)\n    print(f\"SUCCESS: Query executed successfully, found {result.count()} records\")\n    for item in result:\n        print(f\"  - Value: {item.value}, Metadata Type: {item.metadata_type.label}\")\nexcept Exception as e:\n    print(f\"ERROR: {type(e).__name__}: {e}\")\n    import traceback\n    traceback.print_exc()\nEOF\n```",
-    "reward": -0.02969503112772879
+    "reward": 0.21395374949521176
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this updated reproduction script with `filterable=False`.\n\n```bash\ncd /testbed && python reproduce_issue2.py\n```",
-    "reward": -0.049491718546214654
+    "reward": 0.18992291582535292
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I've successfully reproduced the issue. The problem is clear: when a model instance has a field named `filterable` with value `False`, the `check_filterable` method incorrectly treats it as a non-filterable expression.\n\nAccording to the previous attempt analysis, the fix is to restrict the `filterable` check to only `BaseExpression` instances. Let me now implement the fix by modifying the `check_filterable` method.\n\n```bash\ncat <<'EOF' > /testbed/fix_check_filterable.py\nimport sys\n\n# Read the file\nwith open('/testbed/django/db/models/sql/query.py', 'r') as f:\n    lines = f.readlines()\n\n# Find and replace the check_filterable method\nnew_lines = []\nin_check_filterable = False\nmethod_start_line = None\n\nfor i, line in enumerate(lines):\n    if 'def check_filterable(self, expression):' in line:\n        in_check_filterable = True\n        method_start_line = i\n        new_lines.append(line)\n    elif in_check_filterable and line.strip().startswith('\"\"\"'):\n        # This is the docstring\n        new_lines.append(line)\n    elif in_check_filterable and 'if not getattr(expression' in line:\n        # Replace the problematic line with the fix\n        indent = len(line) - len(line.lstrip())\n        new_lines.append(' ' * indent + '# Only check filterable attribute on BaseExpression instances to avoid\\n')\n        new_lines.append(' ' * indent + '# false positives with model instances that have a \"filterable\" field.\\n')\n        new_lines.append(' ' * indent + 'if isinstance(expression, BaseExpression) and not expression.filterable:\\n')\n        # Skip the next 3 lines (the raise NotSupportedError block)\n        continue\n    elif in_check_filterable and 'raise NotSupportedError(' in line:\n        new_lines.append(line)\n    elif in_check_filterable and \"expression.__class__.__name__ + ' is disallowed\" in line:\n        new_lines.append(line)\n    elif in_check_filterable and \"'clause.'\" in line or \"'clause.'\" in line:\n        new_lines.append(line)\n        in_check_filterable = False  # End of the if block\n    else:\n        new_lines.append(line)\n\n# Write the file back\nwith open('/testbed/django/db/models/sql/query.py', 'w') as f:\n    f.writelines(new_lines)\n\nprint(\"Fix applied successfully!\")\nEOF\npython /testbed/fix_check_filterable.py\n```",
-    "reward": -0.08248619757702443
+    "reward": 0.1498715263755882
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me verify the changes were applied correctly by viewing the modified method.\n\n```bash\nnl -ba /testbed/django/db/models/sql/query.py | sed -n '1125,1135p'\n```",
-    "reward": -0.13747699596170737
+    "reward": 0.08311921062598032
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix has been applied correctly. Now let me test it with the reproduction script to verify it works.\n\n```bash\ncd /testbed && python reproduce_issue2.py\n```",
-    "reward": -0.14579499326951226
+    "reward": 0.05519868437663386
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works. Now let me create a more comprehensive test to ensure we haven't broken anything and that Window expressions (which should be non-filterable) still raise the error correctly.\n\n```bash\ncat <<'EOF' > /testbed/test_comprehensive.py\n\"\"\"\nComprehensive test for the filterable fix.\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=True,\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import F, Window, RowNumber\n\n# Test 1: Model with filterable field\nprint(\"=\" * 60)\nprint(\"Test 1: Model instance with filterable=False field\")\nprint(\"=\" * 60)\n\nclass ProductMetaDataType(models.Model):\n    label = models.CharField(max_length=255, unique=True, blank=False, null=False)\n    filterable = models.BooleanField(default=False, verbose_name=\"filterable\")\n    \n    class Meta:\n        app_label = \"test_app\"\n        \n    def __str__(self):\n        return self.label\n\nclass ProductMetaData(models.Model):\n    id = models.BigAutoField(primary_key=True)\n    value = models.TextField(null=False, blank=False)\n    metadata_type = models.ForeignKey(\n        ProductMetaDataType, null=False, blank=False, on_delete=models.CASCADE\n    )\n    \n    class Meta:\n        app_label = \"test_app\"\n\n# Create tables\nfrom django.db import connection\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ProductMetaDataType)\n    schema_editor.create_model(ProductMetaData)\n\n# Create test data with filterable=False\nmetadata_type = ProductMetaDataType.objects.create(label=\"Brand\", filterable=False)\nProductMetaData.objects.create(value=\"Dark Vador\", metadata_type=metadata_type)\n\ntry:\n    result = ProductMetaData.objects.filter(value=\"Dark Vador\", metadata_type=metadata_type)\n    print(f\"\u2713 SUCCESS: Query with filterable=False field executed, found {result.count()} records\")\nexcept Exception as e:\n    print(f\"\u2717 FAILED: {type(e).__name__}: {e}\")\n\n# Test 2: Model with filterable=True field\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 2: Model instance with filterable=True field\")\nprint(\"=\" * 60)\n\nmetadata_type2 = ProductMetaDataType.objects.create(label=\"Category\", filterable=True)\nProductMetaData.objects.create(value=\"Sci-Fi\", metadata_type=metadata_type2)\n\ntry:\n    result = ProductMetaData.objects.filter(value=\"Sci-Fi\", metadata_type=metadata_type2)\n    print(f\"\u2713 SUCCESS: Query with filterable=True field executed, found {result.count()} records\")\nexcept Exception as e:\n    print(f\"\u2717 FAILED: {type(e).__name__}: {e}\")\n\n# Test 3: F expressions should still work\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 3: F expressions (should work)\")\nprint(\"=\" * 60)\n\ntry:\n    result = ProductMetaData.objects.filter(value=F('value'))\n    print(f\"\u2713 SUCCESS: F expression in filter works, found {result.count()} records\")\nexcept Exception as e:\n    print(f\"\u2717 FAILED: {type(e).__name__}: {e}\")\n\n# Test 4: Window expressions should still be disallowed\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 4: Window expressions (should be disallowed)\")\nprint(\"=\" * 60)\n\ntry:\n    window = Window(expression=RowNumber())\n    result = ProductMetaData.objects.filter(value=window)\n    print(f\"\u2717 FAILED: Window expression should have been disallowed but wasn't!\")\nexcept Exception as e:\n    if \"NotSupportedError\" in str(type(e).__name__):\n        print(f\"\u2713 SUCCESS: Window expression correctly disallowed: {e}\")\n    else:\n        print(f\"\u2717 FAILED with unexpected error: {type(e).__name__}: {e}\")\n\n# Test 5: Model with filterable property\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 5: Model instance with filterable property\")\nprint(\"=\" * 60)\n\nclass ModelWithFilterableProperty(models.Model):\n    name = models.CharField(max_length=100)\n    \n    @property\n    def filterable(self):\n        return False\n    \n    class Meta:\n        app_label = \"test_app\"\n\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ModelWithFilterableProperty)\n\nobj_with_prop = ModelWithFilterableProperty.objects.create(name=\"Test\")\n\nclass RelatedModel(models.Model):\n    related = models.ForeignKey(ModelWithFilterableProperty, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = \"test_app\"\n\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(RelatedModel)\n\nRelatedModel.objects.create(related=obj_with_prop)\n\ntry:\n    result = RelatedModel.objects.filter(related=obj_with_prop)\n    print(f\"\u2713 SUCCESS: Query with filterable property executed, found {result.count()} records\")\nexcept Exception as e:\n    print(f\"\u2717 FAILED: {type(e).__name__}: {e}\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"All tests completed!\")\nprint(\"=\" * 60)\nEOF\n```",
-    "reward": -0.15965832211585376
+    "reward": 0.008664473961056435
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the comprehensive test to ensure all scenarios work correctly.\n\n```bash\ncd /testbed && python test_comprehensive.py\n```",
-    "reward": -0.43276387019308965
+    "reward": -0.3188925433982393
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me fix the import error and use a different window function.\n\n```bash\ncat <<'EOF' > /testbed/test_comprehensive.py\n\"\"\"\nComprehensive test for the filterable fix.\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=True,\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import F, Window, Count\nfrom django.db.models.functions import RowNumber\n\n# Test 1: Model with filterable field\nprint(\"=\" * 60)\nprint(\"Test 1: Model instance with filterable=False field\")\nprint(\"=\" * 60)\n\nclass ProductMetaDataType(models.Model):\n    label = models.CharField(max_length=255, unique=True, blank=False, null=False)\n    filterable = models.BooleanField(default=False, verbose_name=\"filterable\")\n    \n    class Meta:\n        app_label = \"test_app\"\n        \n    def __str__(self):\n        return self.label\n\nclass ProductMetaData(models.Model):\n    id = models.BigAutoField(primary_key=True)\n    value = models.TextField(null=False, blank=False)\n    metadata_type = models.ForeignKey(\n        ProductMetaDataType, null=False, blank=False, on_delete=models.CASCADE\n    )\n    \n    class Meta:\n        app_label = \"test_app\"\n\n# Create tables\nfrom django.db import connection\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ProductMetaDataType)\n    schema_editor.create_model(ProductMetaData)\n\n# Create test data with filterable=False\nmetadata_type = ProductMetaDataType.objects.create(label=\"Brand\", filterable=False)\nProductMetaData.objects.create(value=\"Dark Vador\", metadata_type=metadata_type)\n\ntry:\n    result = ProductMetaData.objects.filter(value=\"Dark Vador\", metadata_type=metadata_type)\n    print(f\"\u2713 SUCCESS: Query with filterable=False field executed, found {result.count()} records\")\nexcept Exception as e:\n    print(f\"\u2717 FAILED: {type(e).__name__}: {e}\")\n\n# Test 2: Model with filterable=True field\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 2: Model instance with filterable=True field\")\nprint(\"=\" * 60)\n\nmetadata_type2 = ProductMetaDataType.objects.create(label=\"Category\", filterable=True)\nProductMetaData.objects.create(value=\"Sci-Fi\", metadata_type=metadata_type2)\n\ntry:\n    result = ProductMetaData.objects.filter(value=\"Sci-Fi\", metadata_type=metadata_type2)\n    print(f\"\u2713 SUCCESS: Query with filterable=True field executed, found {result.count()} records\")\nexcept Exception as e:\n    print(f\"\u2717 FAILED: {type(e).__name__}: {e}\")\n\n# Test 3: F expressions should still work\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 3: F expressions (should work)\")\nprint(\"=\" * 60)\n\ntry:\n    result = ProductMetaData.objects.filter(value=F('value'))\n    print(f\"\u2713 SUCCESS: F expression in filter works, found {result.count()} records\")\nexcept Exception as e:\n    print(f\"\u2717 FAILED: {type(e).__name__}: {e}\")\n\n# Test 4: Window expressions should still be disallowed\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 4: Window expressions (should be disallowed)\")\nprint(\"=\" * 60)\n\ntry:\n    window = Window(expression=RowNumber())\n    result = ProductMetaData.objects.filter(value=window)\n    print(f\"\u2717 FAILED: Window expression should have been disallowed but wasn't!\")\nexcept Exception as e:\n    if \"NotSupportedError\" in str(type(e).__name__):\n        print(f\"\u2713 SUCCESS: Window expression correctly disallowed: {e}\")\n    else:\n        print(f\"\u2717 FAILED with unexpected error: {type(e).__name__}: {e}\")\n\n# Test 5: Model with filterable property\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 5: Model instance with filterable property\")\nprint(\"=\" * 60)\n\nclass ModelWithFilterableProperty(models.Model):\n    name = models.CharField(max_length=100)\n    \n    @property\n    def filterable(self):\n        return False\n    \n    class Meta:\n        app_label = \"test_app\"\n\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ModelWithFilterableProperty)\n\nobj_with_prop = ModelWithFilterableProperty.objects.create(name=\"Test\")\n\nclass RelatedModel(models.Model):\n    related = models.ForeignKey(ModelWithFilterableProperty, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = \"test_app\"\n\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(RelatedModel)\n\nRelatedModel.objects.create(related=obj_with_prop)\n\ntry:\n    result = RelatedModel.objects.filter(related=obj_with_prop)\n    print(f\"\u2713 SUCCESS: Query with filterable property executed, found {result.count()} records\")\nexcept Exception as e:\n    print(f\"\u2717 FAILED: {type(e).__name__}: {e}\")\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"All tests completed!\")\nprint(\"=\" * 60)\nEOF\n```",
-    "reward": -0.22127311698848276
+    "reward": -0.03148757233039884
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the comprehensive test again.\n\n```bash\ncd /testbed && python test_comprehensive.py\n```",
-    "reward": -0.36878852831413794
+    "reward": -0.2191459538839981
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me fix the unicode issue by using simple ASCII characters instead.\n\n```bash\ncat <<'EOF' > /testbed/test_comprehensive.py\n\"\"\"\nComprehensive test for the filterable fix.\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=True,\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import F, Window, Count\nfrom django.db.models.functions import RowNumber\n\n# Test 1: Model with filterable field\nprint(\"=\" * 60)\nprint(\"Test 1: Model instance with filterable=False field\")\nprint(\"=\" * 60)\n\nclass ProductMetaDataType(models.Model):\n    label = models.CharField(max_length=255, unique=True, blank=False, null=False)\n    filterable = models.BooleanField(default=False, verbose_name=\"filterable\")\n    \n    class Meta:\n        app_label = \"test_app\"\n        \n    def __str__(self):\n        return self.label\n\nclass ProductMetaData(models.Model):\n    id = models.BigAutoField(primary_key=True)\n    value = models.TextField(null=False, blank=False)\n    metadata_type = models.ForeignKey(\n        ProductMetaDataType, null=False, blank=False, on_delete=models.CASCADE\n    )\n    \n    class Meta:\n        app_label = \"test_app\"\n\n# Create tables\nfrom django.db import connection\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ProductMetaDataType)\n    schema_editor.create_model(ProductMetaData)\n\n# Create test data with filterable=False\nmetadata_type = ProductMetaDataType.objects.create(label=\"Brand\", filterable=False)\nProductMetaData.objects.create(value=\"Dark Vador\", metadata_type=metadata_type)\n\ntry:\n    result = ProductMetaData.objects.filter(value=\"Dark Vador\", metadata_type=metadata_type)\n    print(\"[PASS] Query with filterable=False field executed, found {} records\".format(result.count()))\nexcept Exception as e:\n    print(\"[FAIL] {}: {}\".format(type(e).__name__, e))\n\n# Test 2: Model with filterable=True field\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 2: Model instance with filterable=True field\")\nprint(\"=\" * 60)\n\nmetadata_type2 = ProductMetaDataType.objects.create(label=\"Category\", filterable=True)\nProductMetaData.objects.create(value=\"Sci-Fi\", metadata_type=metadata_type2)\n\ntry:\n    result = ProductMetaData.objects.filter(value=\"Sci-Fi\", metadata_type=metadata_type2)\n    print(\"[PASS] Query with filterable=True field executed, found {} records\".format(result.count()))\nexcept Exception as e:\n    print(\"[FAIL] {}: {}\".format(type(e).__name__, e))\n\n# Test 3: F expressions should still work\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 3: F expressions (should work)\")\nprint(\"=\" * 60)\n\ntry:\n    result = ProductMetaData.objects.filter(value=F('value'))\n    print(\"[PASS] F expression in filter works, found {} records\".format(result.count()))\nexcept Exception as e:\n    print(\"[FAIL] {}: {}\".format(type(e).__name__, e))\n\n# Test 4: Window expressions should still be disallowed\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 4: Window expressions (should be disallowed)\")\nprint(\"=\" * 60)\n\ntry:\n    window = Window(expression=RowNumber())\n    result = ProductMetaData.objects.filter(value=window)\n    print(\"[FAIL] Window expression should have been disallowed but wasn't!\")\nexcept Exception as e:\n    if \"NotSupportedError\" in str(type(e).__name__):\n        print(\"[PASS] Window expression correctly disallowed: {}\".format(e))\n    else:\n        print(\"[FAIL] Unexpected error: {}: {}\".format(type(e).__name__, e))\n\n# Test 5: Model with filterable property\nprint(\"\\n\" + \"=\" * 60)\nprint(\"Test 5: Model instance with filterable property\")\nprint(\"=\" * 60)\n\nclass ModelWithFilterableProperty(models.Model):\n    name = models.CharField(max_length=100)\n    \n    @property\n    def filterable(self):\n        return False\n    \n    class Meta:\n        app_label = \"test_app\"\n\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ModelWithFilterableProperty)\n\nobj_with_prop = ModelWithFilterableProperty.objects.create(name=\"Test\")\n\nclass RelatedModel(models.Model):\n    related = models.ForeignKey(ModelWithFilterableProperty, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = \"test_app\"\n\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(RelatedModel)\n\nRelatedModel.objects.create(related=obj_with_prop)\n\ntry:\n    result = RelatedModel.objects.filter(related=obj_with_prop)\n    print(\"[PASS] Query with filterable property executed, found {} records\".format(result.count()))\nexcept Exception as e:\n    print(\"[FAIL] {}: {}\".format(type(e).__name__, e))\n\nprint(\"\\n\" + \"=\" * 60)\nprint(\"All tests completed!\")\nprint(\"=\" * 60)\nEOF\n```",
-    "reward": -0.03131421385689662
+    "reward": 0.21809007686000312
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the comprehensive test again.\n\n```bash\ncd /testbed && python test_comprehensive.py\n```",
-    "reward": -0.05219035642816103
+    "reward": 0.19681679476667185
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me run the Django test suite to ensure we haven't broken anything. Let me first check if there are existing tests for the query module.\n\n```bash\nfind /testbed -path \"*/tests/*\" -name \"*query*\" -type f | grep -E \"\\.py$\" | head -10\n```",
-    "reward": -0.003650594046935039
+    "reward": 0.2446946579444531
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the query-related tests to ensure our fix doesn't break existing functionality.\n\n```bash\ncd /testbed && python -m pytest tests/queries/test_query.py -xvs 2>&1 | head -100\n```",
-    "reward": -0.0060843234115583985
+    "reward": 0.2411577632407552
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me use Django's test runner instead.\n\n```bash\ncd /testbed && python -m django test tests.queries.test_query --settings=tests.test_sqlite -v 2 2>&1 | head -150\n```",
-    "reward": -0.010140539019263997
+    "reward": 0.235262938734592
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try a different approach and run the tests using the proper test settings.\n\n```bash\ncd /testbed && ./tests/runtests.py queries.test_query -v 2 2>&1 | head -200\n```",
-    "reward": -0.016900898365439995
+    "reward": 0.22543823122432
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The query tests pass. Now let me run tests related to expressions and window functions to ensure those still work correctly.\n\n```bash\ncd /testbed && ./tests/runtests.py expressions -v 2 2>&1 | tail -50\n```",
-    "reward": -0.028168163942399994
+    "reward": 0.2090637187072
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All expression tests pass. Now let me run window function tests to ensure Window expressions are still properly disallowed in filters.\n\n```bash\ncd /testbed && ./tests/runtests.py expressions_window -v 2 2>&1 | tail -50\n```",
-    "reward": -0.04694693990399999
+    "reward": 0.181772864512
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All window function tests pass. Now let me check if there are any tests specifically for the `check_filterable` method or filtering behavior.\n\n```bash\ncd /testbed && grep -r \"check_filterable\" tests/ --include=\"*.py\" | head -20\n```",
-    "reward": -0.07824489983999999
+    "reward": 0.13628810752
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: There are no existing tests for `check_filterable`. Let me search for tests related to Window expressions being disallowed in filters.\n\n```bash\ncd /testbed && grep -r \"disallowed in the filter\" tests/ --include=\"*.py\" | head -20\n```",
-    "reward": -0.1304081664
+    "reward": 0.06048017920000002
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Let me check those tests to ensure they still work with our fix.\n\n```bash\nnl -ba /testbed/tests/expressions_window/tests.py | grep -B 10 -A 10 \"disallowed in the filter\"\n```",
-    "reward": -0.217346944
+    "reward": -0.06586636799999998
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Let me run these specific tests to ensure they still pass with our fix.\n\n```bash\ncd /testbed && ./tests/runtests.py expressions_window.tests.WindowFunctionTests.test_invalid_filter -v 2\n```",
-    "reward": -0.44557824
+    "reward": -0.35977728000000003
   },
   {
     "role": "user",
@@ -407,7 +407,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the entire test class instead.\n\n```bash\ncd /testbed && ./tests/runtests.py expressions_window.tests.WindowFunctionTests -v 2 2>&1 | grep -A 5 \"test_invalid_filter\"\n```",
-    "reward": -0.2426304
+    "reward": -0.09962880000000005
   },
   {
     "role": "user",
@@ -421,7 +421,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me just run all window tests again to confirm they pass.\n\n```bash\ncd /testbed && ./tests/runtests.py expressions_window.tests -v 2 2>&1 | grep -E \"(test_invalid_filter|OK|FAILED)\"\n```",
-    "reward": 0.09561599999999998
+    "reward": 0.3339519999999999
   },
   {
     "role": "user",
@@ -435,7 +435,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The `test_invalid_filter` test passes, which means Window expressions are still correctly disallowed in filters. Now let me verify the final state of our fix one more time and then submit.\n\n```bash\nnl -ba /testbed/django/db/models/sql/query.py | sed -n '1125,1136p'\n```",
-    "reward": 0.15935999999999997
+    "reward": 0.38991999999999993
   },
   {
     "role": "user",
@@ -449,7 +449,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Let me run one final comprehensive test to ensure everything works as expected, including edge cases.\n\n```bash\ncat <<'EOF' > /testbed/final_test.py\n\"\"\"\nFinal comprehensive test for the filterable fix.\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=True,\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.db.models import F, Q, Window\nfrom django.db.models.functions import RowNumber\n\nprint(\"Testing the fix for filterable field issue...\")\nprint(\"=\" * 70)\n\n# Test 1: Original issue - model with filterable=False field\nclass ProductMetaDataType(models.Model):\n    label = models.CharField(max_length=255, unique=True)\n    filterable = models.BooleanField(default=False)\n    \n    class Meta:\n        app_label = \"test_app\"\n\nclass ProductMetaData(models.Model):\n    id = models.BigAutoField(primary_key=True)\n    value = models.TextField()\n    metadata_type = models.ForeignKey(ProductMetaDataType, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = \"test_app\"\n\nfrom django.db import connection\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ProductMetaDataType)\n    schema_editor.create_model(ProductMetaData)\n\n# Test with filterable=False\nmetadata_type_false = ProductMetaDataType.objects.create(label=\"Brand\", filterable=False)\nProductMetaData.objects.create(value=\"Dark Vador\", metadata_type=metadata_type_false)\n\ntry:\n    result = ProductMetaData.objects.filter(metadata_type=metadata_type_false)\n    print(\"[PASS] Test 1: Filter with filterable=False field works\")\nexcept Exception as e:\n    print(\"[FAIL] Test 1: {}\".format(e))\n\n# Test with filterable=True\nmetadata_type_true = ProductMetaDataType.objects.create(label=\"Category\", filterable=True)\nProductMetaData.objects.create(value=\"Sci-Fi\", metadata_type=metadata_type_true)\n\ntry:\n    result = ProductMetaData.objects.filter(metadata_type=metadata_type_true)\n    print(\"[PASS] Test 2: Filter with filterable=True field works\")\nexcept Exception as e:\n    print(\"[FAIL] Test 2: {}\".format(e))\n\n# Test with Q objects\ntry:\n    result = ProductMetaData.objects.filter(Q(metadata_type=metadata_type_false) | Q(value=\"Sci-Fi\"))\n    print(\"[PASS] Test 3: Q objects with filterable field work\")\nexcept Exception as e:\n    print(\"[FAIL] Test 3: {}\".format(e))\n\n# Test with F expressions\ntry:\n    result = ProductMetaData.objects.filter(value=F('value'))\n    print(\"[PASS] Test 4: F expressions still work\")\nexcept Exception as e:\n    print(\"[FAIL] Test 4: {}\".format(e))\n\n# Test that Window expressions are still disallowed\ntry:\n    window = Window(expression=RowNumber())\n    result = ProductMetaData.objects.filter(value=window)\n    print(\"[FAIL] Test 5: Window expressions should be disallowed!\")\nexcept Exception as e:\n    if \"NotSupportedError\" in str(type(e).__name__):\n        print(\"[PASS] Test 5: Window expressions correctly disallowed\")\n    else:\n        print(\"[FAIL] Test 5: Wrong exception: {}\".format(e))\n\n# Test with model having filterable property\nclass ModelWithProperty(models.Model):\n    name = models.CharField(max_length=100)\n    \n    @property\n    def filterable(self):\n        return False\n    \n    class Meta:\n        app_label = \"test_app\"\n\nclass RelatedToProperty(models.Model):\n    related = models.ForeignKey(ModelWithProperty, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = \"test_app\"\n\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ModelWithProperty)\n    schema_editor.create_model(RelatedToProperty)\n\nobj_with_prop = ModelWithProperty.objects.create(name=\"Test\")\nRelatedToProperty.objects.create(related=obj_with_prop)\n\ntry:\n    result = RelatedToProperty.objects.filter(related=obj_with_prop)\n    print(\"[PASS] Test 6: Model with filterable property works\")\nexcept Exception as e:\n    print(\"[FAIL] Test 6: {}\".format(e))\n\n# Test with list of model instances\ntry:\n    result = ProductMetaData.objects.filter(metadata_type__in=[metadata_type_false, metadata_type_true])\n    print(\"[PASS] Test 7: Filter with list of model instances works\")\nexcept Exception as e:\n    print(\"[FAIL] Test 7: {}\".format(e))\n\nprint(\"=\" * 70)\nprint(\"All tests completed successfully!\")\nEOF\ncd /testbed && python final_test.py\n```",
-    "reward": 0.26559999999999995
+    "reward": 0.48319999999999996
   },
   {
     "role": "user",
@@ -463,7 +463,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me run a broader set of Django tests to ensure we haven't broken anything else.\n\n```bash\ncd /testbed && ./tests/runtests.py queries expressions expressions_window --parallel 1 -v 1 2>&1 | tail -20\n```",
-    "reward": 0.27599999999999997
+    "reward": 0.472
   },
   {
     "role": "user",
@@ -477,7 +477,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Let me create one more test to verify the exact scenario from the PR description works correctly.\n\n```bash\ncat <<'EOF' > /testbed/test_pr_scenario.py\n\"\"\"\nTest the exact scenario from the PR description.\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n        ],\n        USE_TZ=True,\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.utils import timezone\nfrom django.utils.translation import gettext_lazy as _\n\n# Exact models from PR description\nclass ProductMetaDataType(models.Model):\n    label = models.CharField(max_length=255, unique=True, blank=False, null=False)\n    filterable = models.BooleanField(default=False, verbose_name=_(\"filterable\"))\n    \n    class Meta:\n        app_label = \"adminpricing\"\n        verbose_name = _(\"product meta data type\")\n        verbose_name_plural = _(\"product meta data types\")\n    \n    def __str__(self):\n        return self.label\n\nclass Produit(models.Model):\n    name = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = \"adminpricing\"\n\nclass Plateforme(models.Model):\n    name = models.CharField(max_length=255)\n    \n    class Meta:\n        app_label = \"adminpricing\"\n\nclass ProductMetaData(models.Model):\n    id = models.BigAutoField(primary_key=True)\n    product = models.ForeignKey(Produit, null=False, blank=False, on_delete=models.CASCADE)\n    value = models.TextField(null=False, blank=False)\n    marketplace = models.ForeignKey(Plateforme, null=False, blank=False, on_delete=models.CASCADE)\n    date_created = models.DateTimeField(null=True, default=timezone.now)\n    metadata_type = models.ForeignKey(ProductMetaDataType, null=False, blank=False, on_delete=models.CASCADE)\n    \n    class Meta:\n        app_label = \"adminpricing\"\n        verbose_name = _(\"product meta data\")\n        verbose_name_plural = _(\"product meta datas\")\n\n# Create tables\nfrom django.db import connection\nwith connection.schema_editor() as schema_editor:\n    schema_editor.create_model(ProductMetaDataType)\n    schema_editor.create_model(Produit)\n    schema_editor.create_model(Plateforme)\n    schema_editor.create_model(ProductMetaData)\n\n# Create test data\nbrand_metadata = ProductMetaDataType.objects.create(label=\"Brand\", filterable=False)\nproduct = Produit.objects.create(name=\"Test Product\")\nmarketplace = Plateforme.objects.create(name=\"Test Marketplace\")\nProductMetaData.objects.create(\n    value=\"Dark Vador\",\n    metadata_type=brand_metadata,\n    product=product,\n    marketplace=marketplace\n)\n\n# Exact query from PR description that was failing\nprint(\"Testing exact query from PR description...\")\ntry:\n    for p in ProductMetaData.objects.filter(value=\"Dark Vador\", metadata_type=brand_metadata):\n        print(\"SUCCESS: Found ProductMetaData with value='{}' and metadata_type='{}'\".format(\n            p.value, p.metadata_type.label\n        ))\n    print(\"\\nThe issue has been fixed! The query that was raising NotSupportedError now works correctly.\")\nexcept Exception as e:\n    print(\"FAILED: {}\".format(e))\n    import traceback\n    traceback.print_exc()\nEOF\ncd /testbed && python test_pr_scenario.py\n```",
-    "reward": 0.45999999999999996
+    "reward": 0.62
   },
   {
     "role": "user",
@@ -494,7 +494,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix is working correctly for the exact scenario described in the PR. Now let me verify the fix one more time and prepare to submit.\n\n```bash\ncat /testbed/django/db/models/sql/query.py | grep -A 10 \"def check_filterable\"\n```",
-    "reward": 0.6
+    "reward": 0.7
   },
   {
     "role": "user",

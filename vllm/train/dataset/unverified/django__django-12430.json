@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by understanding the repository structure and locating the relevant files mentioned in the PR description and previous attempt. The issue is about CacheHandler using threading.local instead of asgiref.local.Local, which can cause data corruption in async code.\n\n```bash\nfind /testbed -type f -name \"__init__.py\" -path \"*/core/cache/*\" | head -5\n```",
-    "reward": 0.08803058104344409
+    "reward": 0.36655632717036335
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the cache module. Let me examine the CacheHandler implementation in django/core/cache/__init__.py to understand the current implementation.\n\n```bash\ncat /testbed/django/core/cache/__init__.py\n```",
-    "reward": 0.14671763507240682
+    "reward": 0.444260545283939
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see the issue clearly. On line 13, the code imports `from threading import local`, and on line 66, it uses `self._caches = local()`. According to the PR description and the previous attempt analysis, this should be replaced with `asgiref.local.Local` to support async contexts properly.\n\nLet me check if asgiref is available in the codebase and see how it's used elsewhere in Django.\n\n```bash\ngrep -r \"from asgiref.local import Local\" /testbed/django --include=\"*.py\" | head -5\n```",
-    "reward": -0.0054706082126552875
+    "reward": 0.24043424213989828
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! I can see that Django already uses `asgiref.local.Local` in multiple places (db/utils.py, utils/timezone.py, etc.). This confirms that the fix is consistent with Django's existing patterns. Let me look at one of these files to see how it's used.\n\n```bash\ngrep -A 5 \"from asgiref.local import Local\" /testbed/django/db/utils.py | head -20\n```",
-    "reward": -0.00911768035442548
+    "reward": 0.2340570702331638
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me see how Local is actually instantiated in db/utils.py to ensure I follow the same pattern.\n\n```bash\ngrep -B 2 -A 2 \"= Local()\" /testbed/django/db/utils.py | head -10\n```",
-    "reward": -0.015196133924042466
+    "reward": 0.22342845038860631
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me search for how Local is used in db/utils.py more broadly.\n\n```bash\ngrep \"Local\" /testbed/django/db/utils.py\n```",
-    "reward": -0.02532688987340411
+    "reward": 0.20571408398101054
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see that in db/utils.py, they use `Local(thread_critical=True)`. Let me check the CacheHandler more carefully to understand if we need the thread_critical parameter. Let me also check the asgiref documentation or other usages to understand this parameter better.\n\n```bash\ngrep -r \"Local()\" /testbed/django --include=\"*.py\" | head -10\n```",
-    "reward": -0.04221148312234019
+    "reward": 0.17619013996835092
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Interesting! I can see that in /testbed/django/test/signals.py, there's already a reference to `caches._caches = Local()`, which suggests that the test infrastructure is already aware of this issue and uses Local for testing. This confirms that the fix is correct.\n\nNow let me create a test script to reproduce the issue before making the fix, then apply the fix, and verify it works.\n\n```bash\ncat <<'EOF' > /testbed/test_async_cache.py\n\"\"\"\nTest script to demonstrate the race condition with threading.local in async code.\nThis should fail with threading.local and succeed with asgiref.local.Local.\n\"\"\"\nimport asyncio\nimport sys\nimport os\n\n# Add Django to path\nsys.path.insert(0, '/testbed')\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\n\nimport django\nfrom django.conf import settings\n\n# Configure minimal settings for cache\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        CACHES={\n            'default': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'default-cache',\n            },\n            'cache1': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'cache1-location',\n            },\n            'cache2': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'cache2-location',\n            },\n        }\n    )\n\ndjango.setup()\n\nfrom django.core.cache import caches\n\nasync def test_async_cache_isolation():\n    \"\"\"Test that cache instances are properly isolated in async contexts.\"\"\"\n    \n    async def coroutine1():\n        # Access cache1 in this coroutine\n        cache = caches['cache1']\n        cache.set('key1', 'value_from_coroutine1', timeout=10)\n        await asyncio.sleep(0.01)  # Simulate some async work\n        result = cache.get('key1')\n        return ('coroutine1', result)\n    \n    async def coroutine2():\n        # Access cache2 in this coroutine\n        cache = caches['cache2']\n        cache.set('key2', 'value_from_coroutine2', timeout=10)\n        await asyncio.sleep(0.01)  # Simulate some async work\n        result = cache.get('key2')\n        return ('coroutine2', result)\n    \n    # Run both coroutines concurrently\n    results = await asyncio.gather(coroutine1(), coroutine2())\n    \n    print(\"Results from concurrent coroutines:\")\n    for name, value in results:\n        print(f\"  {name}: {value}\")\n    \n    # Verify results\n    assert results[0][1] == 'value_from_coroutine1', f\"Expected 'value_from_coroutine1', got {results[0][1]}\"\n    assert results[1][1] == 'value_from_coroutine2', f\"Expected 'value_from_coroutine2', got {results[1][1]}\"\n    \n    print(\"\\n\u2713 Test passed: Cache instances are properly isolated in async contexts\")\n\nasync def test_cache_instance_isolation():\n    \"\"\"Test that different cache aliases maintain separate instances per context.\"\"\"\n    \n    async def check_cache_identity():\n        cache1_id = id(caches['cache1'])\n        cache2_id = id(caches['cache2'])\n        await asyncio.sleep(0.001)\n        cache1_id_after = id(caches['cache1'])\n        cache2_id_after = id(caches['cache2'])\n        \n        # Same alias should return same instance within same context\n        assert cache1_id == cache1_id_after, \"Cache instance changed within same context\"\n        assert cache2_id == cache2_id_after, \"Cache instance changed within same context\"\n        \n        # Different aliases should have different instances\n        assert cache1_id != cache2_id, \"Different cache aliases should have different instances\"\n        \n        return (cache1_id, cache2_id)\n    \n    # Run multiple times concurrently\n    results = await asyncio.gather(*[check_cache_identity() for _ in range(5)])\n    \n    print(\"\\nCache instance IDs across concurrent contexts:\")\n    for i, (c1_id, c2_id) in enumerate(results):\n        print(f\"  Context {i}: cache1={c1_id}, cache2={c2_id}\")\n    \n    print(\"\\n\u2713 Test passed: Cache instances maintain proper identity\")\n\nif __name__ == '__main__':\n    print(\"Testing async cache behavior...\\n\")\n    try:\n        asyncio.run(test_async_cache_isolation())\n        asyncio.run(test_cache_instance_isolation())\n        print(\"\\n\" + \"=\"*60)\n        print(\"ALL TESTS PASSED\")\n        print(\"=\"*60)\n    except Exception as e:\n        print(f\"\\n\u2717 Test failed with error: {e}\")\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": -0.07035247187056698
+    "reward": 0.1269835666139182
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the test script to see if it demonstrates the issue with the current implementation using threading.local.\n\n```bash\ncd /testbed && python test_async_cache.py\n```",
-    "reward": -0.283920786450945
+    "reward": -0.12169405564346972
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The Python version seems to be older (asyncio.run was added in Python 3.7). Let me update the test script to be compatible with older Python versions and fix the unicode issue.\n\n```bash\ncat <<'EOF' > /testbed/test_async_cache.py\n\"\"\"\nTest script to demonstrate the race condition with threading.local in async code.\nThis should fail with threading.local and succeed with asgiref.local.Local.\n\"\"\"\nimport asyncio\nimport sys\nimport os\n\n# Add Django to path\nsys.path.insert(0, '/testbed')\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\n\nimport django\nfrom django.conf import settings\n\n# Configure minimal settings for cache\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        CACHES={\n            'default': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'default-cache',\n            },\n            'cache1': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'cache1-location',\n            },\n            'cache2': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'cache2-location',\n            },\n        }\n    )\n\ndjango.setup()\n\nfrom django.core.cache import caches\n\nasync def test_async_cache_isolation():\n    \"\"\"Test that cache instances are properly isolated in async contexts.\"\"\"\n    \n    async def coroutine1():\n        # Access cache1 in this coroutine\n        cache = caches['cache1']\n        cache.set('key1', 'value_from_coroutine1', timeout=10)\n        await asyncio.sleep(0.01)  # Simulate some async work\n        result = cache.get('key1')\n        return ('coroutine1', result)\n    \n    async def coroutine2():\n        # Access cache2 in this coroutine\n        cache = caches['cache2']\n        cache.set('key2', 'value_from_coroutine2', timeout=10)\n        await asyncio.sleep(0.01)  # Simulate some async work\n        result = cache.get('key2')\n        return ('coroutine2', result)\n    \n    # Run both coroutines concurrently\n    results = await asyncio.gather(coroutine1(), coroutine2())\n    \n    print(\"Results from concurrent coroutines:\")\n    for name, value in results:\n        print(\"  {}: {}\".format(name, value))\n    \n    # Verify results\n    assert results[0][1] == 'value_from_coroutine1', \"Expected 'value_from_coroutine1', got {}\".format(results[0][1])\n    assert results[1][1] == 'value_from_coroutine2', \"Expected 'value_from_coroutine2', got {}\".format(results[1][1])\n    \n    print(\"\\n[PASS] Test passed: Cache instances are properly isolated in async contexts\")\n\nasync def test_cache_instance_isolation():\n    \"\"\"Test that different cache aliases maintain separate instances per context.\"\"\"\n    \n    async def check_cache_identity():\n        cache1_id = id(caches['cache1'])\n        cache2_id = id(caches['cache2'])\n        await asyncio.sleep(0.001)\n        cache1_id_after = id(caches['cache1'])\n        cache2_id_after = id(caches['cache2'])\n        \n        # Same alias should return same instance within same context\n        assert cache1_id == cache1_id_after, \"Cache instance changed within same context\"\n        assert cache2_id == cache2_id_after, \"Cache instance changed within same context\"\n        \n        # Different aliases should have different instances\n        assert cache1_id != cache2_id, \"Different cache aliases should have different instances\"\n        \n        return (cache1_id, cache2_id)\n    \n    # Run multiple times concurrently\n    results = await asyncio.gather(*[check_cache_identity() for _ in range(5)])\n    \n    print(\"\\nCache instance IDs across concurrent contexts:\")\n    for i, (c1_id, c2_id) in enumerate(results):\n        print(\"  Context {}: cache1={}, cache2={}\".format(i, c1_id, c2_id))\n    \n    print(\"\\n[PASS] Test passed: Cache instances maintain proper identity\")\n\ndef run_async_test(coro):\n    \"\"\"Helper to run async tests in older Python versions.\"\"\"\n    loop = asyncio.get_event_loop()\n    return loop.run_until_complete(coro)\n\nif __name__ == '__main__':\n    print(\"Testing async cache behavior...\\n\")\n    try:\n        run_async_test(test_async_cache_isolation())\n        run_async_test(test_cache_instance_isolation())\n        print(\"\\n\" + \"=\"*60)\n        print(\"ALL TESTS PASSED\")\n        print(\"=\"*60)\n    except Exception as e:\n        print(\"\\n[FAIL] Test failed with error: {}\".format(e))\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.026798689248425
+    "reward": 0.2971765739275505
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the updated test script to see the current behavior with threading.local.\n\n```bash\ncd /testbed && python test_async_cache.py\n```",
-    "reward": 0.044664482080708334
+    "reward": 0.32862762321258415
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Interesting! The test passes with the current implementation. This is because in the current event loop implementation, all coroutines are running in the same thread, so threading.local works. However, the issue described in the PR is about potential race conditions and data corruption when async code is used. The problem is more subtle - threading.local doesn't provide proper isolation for async contexts, even if they happen to work in simple cases.\n\nLet me create a more sophisticated test that better demonstrates the issue - one that shows the cache instances are shared across async contexts when they shouldn't be.\n\n```bash\ncat <<'EOF' > /testbed/test_async_cache_race.py\n\"\"\"\nTest to demonstrate threading.local issues in async contexts.\nThe problem is that threading.local shares state across all coroutines in the same thread,\nwhich can lead to race conditions and data corruption.\n\"\"\"\nimport asyncio\nimport sys\nimport os\n\nsys.path.insert(0, '/testbed')\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\n\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        CACHES={\n            'default': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n            },\n        }\n    )\n\ndjango.setup()\n\nfrom django.core.cache import caches\n\nasync def test_threading_local_issue():\n    \"\"\"\n    Demonstrate that threading.local shares the _caches.caches dict across\n    all coroutines in the same thread, which is not async-safe.\n    \"\"\"\n    print(\"Testing cache handler storage mechanism...\")\n    \n    # Access the internal storage\n    handler = caches\n    \n    async def coroutine1():\n        # Get cache and check internal state\n        cache = handler['default']\n        # With threading.local, this dict is shared across all coroutines in the thread\n        internal_dict_id = id(handler._caches.caches)\n        await asyncio.sleep(0.001)\n        return ('coroutine1', internal_dict_id)\n    \n    async def coroutine2():\n        cache = handler['default']\n        internal_dict_id = id(handler._caches.caches)\n        await asyncio.sleep(0.001)\n        return ('coroutine2', internal_dict_id)\n    \n    results = await asyncio.gather(coroutine1(), coroutine2())\n    \n    print(\"\\nInternal cache dict IDs:\")\n    for name, dict_id in results:\n        print(\"  {}: {}\".format(name, dict_id))\n    \n    # With threading.local, both coroutines see the SAME dict\n    # With asgiref.local.Local, they would see different dicts (proper isolation)\n    if results[0][1] == results[1][1]:\n        print(\"\\n[WARNING] Both coroutines share the same internal dict!\")\n        print(\"This is expected with threading.local but not async-safe.\")\n        print(\"With asgiref.local.Local, each async context would have its own dict.\")\n        return False\n    else:\n        print(\"\\n[GOOD] Each coroutine has its own internal dict (async-safe)\")\n        return True\n\ndef run_async_test(coro):\n    loop = asyncio.get_event_loop()\n    return loop.run_until_complete(coro)\n\nif __name__ == '__main__':\n    is_async_safe = run_async_test(test_threading_local_issue())\n    \n    print(\"\\n\" + \"=\"*60)\n    if is_async_safe:\n        print(\"RESULT: Implementation is async-safe (using asgiref.local.Local)\")\n    else:\n        print(\"RESULT: Implementation is NOT async-safe (using threading.local)\")\n    print(\"=\"*60)\nEOF\n```",
-    "reward": 0.15777413680118058
+    "reward": 0.4643793720209736
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this test to demonstrate the current behavior with threading.local.\n\n```bash\ncd /testbed && python test_async_cache_race.py\n```",
-    "reward": 0.09629022800196764
+    "reward": 0.4406322867016227
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! This test clearly demonstrates the issue. Both coroutines share the same internal dictionary because threading.local is thread-based, not async-context-based. Now let me apply the fix by replacing threading.local with asgiref.local.Local in the CacheHandler.\n\n```bash\nsed -i 's/from threading import local/from asgiref.local import Local/' /testbed/django/core/cache/__init__.py\n```",
-    "reward": 0.16048371333661274
+    "reward": 0.5677204778360379
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I need to replace the instantiation of `local()` with `Local()` in the CacheHandler.__init__ method.\n\n```bash\nsed -i 's/self._caches = local()/self._caches = Local()/' /testbed/django/core/cache/__init__.py\n```",
-    "reward": 0.01747285556102125
+    "reward": 0.2795341297267298
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me verify the changes were applied correctly by viewing the modified file.\n\n```bash\nhead -70 /testbed/django/core/cache/__init__.py | tail -60\n```",
-    "reward": 0.029121425935035417
+    "reward": 0.29922354954454966
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The changes look correct. Now let me verify the complete CacheHandler class to ensure everything is properly updated.\n\n```bash\ngrep -A 30 \"class CacheHandler:\" /testbed/django/core/cache/__init__.py\n```",
-    "reward": 0.0485357098917257
+    "reward": 0.33203924924091605
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The changes are applied correctly. Now let me update the docstring to reflect that it's now async-safe, not just thread-safe. The docstring currently says \"Ensure only one instance of each alias exists per thread\" but with Local(), it's now per async context as well.\n\n```bash\nsed -i 's/Ensure only one instance of each alias exists per thread\\./Ensure only one instance of each alias exists per thread or async context./' /testbed/django/core/cache/__init__.py\n```",
-    "reward": 0.08089284981954283
+    "reward": 0.38673208206819343
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me also update the DefaultCacheProxy docstring to reflect async-safety.\n\n```bash\ngrep -A 5 \"class DefaultCacheProxy:\" /testbed/django/core/cache/__init__.py\n```",
-    "reward": 0.13482141636590472
+    "reward": 0.477886803446989
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me update the DefaultCacheProxy docstring to mention async-safety as well.\n\n```bash\nsed -i 's/This allows the legacy `cache` object to be thread-safe using the new/This allows the legacy `cache` object to be thread-safe and async-safe using the new/' /testbed/django/core/cache/__init__.py\n```",
-    "reward": 0.2247023606098412
+    "reward": 0.6298113390783149
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me verify all the changes are correct by viewing the complete modified file.\n\n```bash\ncat /testbed/django/core/cache/__init__.py\n```",
-    "reward": 0.37450393434973533
+    "reward": 0.8830188984638583
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All changes look good. Now let me test the fix by running our test script again to verify that the issue is resolved.\n\n```bash\ncd /testbed && python test_async_cache_race.py\n```",
-    "reward": 0.7075065572495589
+    "reward": 1.3883648307730971
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix works. Now each coroutine has its own internal dictionary, which means the cache is properly isolated in async contexts. Let me also run the first test to make sure everything still works correctly.\n\n```bash\ncd /testbed && python test_async_cache.py\n```",
-    "reward": 0.5125109287492648
+    "reward": 1.147274717955162
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Now we can see that each async context gets its own cache instances (notice the different IDs for each context), which is the correct behavior. This demonstrates proper async isolation.\n\nNow let me run Django's cache test suite to ensure we haven't broken anything and that the change is backward compatible.\n\n```bash\ncd /testbed && python -m pytest tests/cache/tests.py -xvs 2>&1 | head -100\n```",
-    "reward": 0.43751821458210816
+    "reward": 0.9954578632586035
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try running the tests using Django's test runner instead.\n\n```bash\ncd /testbed && python tests/runtests.py cache --verbosity=2 2>&1 | head -150\n```",
-    "reward": 0.22919702430351357
+    "reward": 0.6590964387643392
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The tests are running. Let me wait for them to complete and check the final result by redirecting to a file.\n\n```bash\ncd /testbed && python tests/runtests.py cache --verbosity=1 > /tmp/cache_test_results.txt 2>&1 && tail -50 /tmp/cache_test_results.txt\n```",
-    "reward": -0.118004959494144
+    "reward": 0.09849406460723203
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All 476 tests passed with 115 skipped (those are for backends that aren't configured like Memcached). The fix is backward compatible and doesn't break any existing functionality.\n\nNow let me check if there are any other files in the cache module that might also need updating to ensure consistency.\n\n```bash\ngrep -r \"threading.local\" /testbed/django/core/cache/ --include=\"*.py\"\n```",
-    "reward": -0.19667493249024
+    "reward": -0.0025098923212799606
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! No other files in the cache module use threading.local. Let me also check if there are any imports or references to the old threading.local in comments or documentation within the cache module.\n\n```bash\ngrep -r \"threading\" /testbed/django/core/cache/ --include=\"*.py\"\n```",
-    "reward": 0.17220844584959996
+    "reward": 0.49581684613120003
   },
   {
     "role": "user",
@@ -407,7 +407,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: That's fine - locmem.py uses threading.Lock which is appropriate for its use case (protecting shared memory access). Our change is complete and correct.\n\nLet me create one more comprehensive test to ensure the fix works properly in various async scenarios, including the race condition scenario mentioned in the PR.\n\n```bash\ncat <<'EOF' > /testbed/test_comprehensive_async.py\n\"\"\"\nComprehensive test for async cache safety after fixing threading.local -> asgiref.local.Local\n\"\"\"\nimport asyncio\nimport sys\nimport os\n\nsys.path.insert(0, '/testbed')\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')\n\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        CACHES={\n            'default': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'default-loc',\n            },\n            'cache_a': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'cache-a-loc',\n            },\n            'cache_b': {\n                'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',\n                'LOCATION': 'cache-b-loc',\n            },\n        }\n    )\n\ndjango.setup()\n\nfrom django.core.cache import caches\n\nasync def test_concurrent_cache_access():\n    \"\"\"Test that concurrent coroutines can safely access different cache instances.\"\"\"\n    results = []\n    \n    async def worker(cache_alias, key, value, delay):\n        cache = caches[cache_alias]\n        cache.set(key, value, timeout=30)\n        await asyncio.sleep(delay)\n        retrieved = cache.get(key)\n        results.append((cache_alias, key, value, retrieved, value == retrieved))\n        return retrieved\n    \n    # Create multiple concurrent workers accessing different caches\n    tasks = [\n        worker('cache_a', 'key1', 'value_a1', 0.01),\n        worker('cache_b', 'key1', 'value_b1', 0.01),\n        worker('cache_a', 'key2', 'value_a2', 0.02),\n        worker('cache_b', 'key2', 'value_b2', 0.02),\n        worker('default', 'key1', 'value_default', 0.015),\n    ]\n    \n    await asyncio.gather(*tasks)\n    \n    print(\"Concurrent cache access results:\")\n    all_passed = True\n    for cache_alias, key, expected, retrieved, passed in results:\n        status = \"PASS\" if passed else \"FAIL\"\n        print(\"  [{}] {}.{}: expected='{}', got='{}'\".format(\n            status, cache_alias, key, expected, retrieved))\n        if not passed:\n            all_passed = False\n    \n    return all_passed\n\nasync def test_cache_isolation_per_context():\n    \"\"\"Test that each async context gets its own cache handler state.\"\"\"\n    \n    async def get_cache_dict_id(context_id):\n        # Access a cache to initialize the handler's internal state\n        _ = caches['default']\n        # Get the ID of the internal caches dict\n        dict_id = id(caches._caches.caches)\n        await asyncio.sleep(0.001)\n        return (context_id, dict_id)\n    \n    # Run multiple contexts concurrently\n    results = await asyncio.gather(*[get_cache_dict_id(i) for i in range(10)])\n    \n    print(\"\\nCache handler isolation per async context:\")\n    dict_ids = [dict_id for _, dict_id in results]\n    unique_ids = len(set(dict_ids))\n    \n    print(\"  Total contexts: {}\".format(len(results)))\n    print(\"  Unique cache dicts: {}\".format(unique_ids))\n    \n    # With asgiref.local.Local, each context should have its own dict\n    # (though some may share if they're in the same async context)\n    if unique_ids > 1:\n        print(\"  [PASS] Multiple async contexts have separate cache dicts\")\n        return True\n    else:\n        print(\"  [WARNING] All contexts share the same cache dict\")\n        return False\n\nasync def test_no_race_condition():\n    \"\"\"Test that there's no race condition when accessing cache from multiple coroutines.\"\"\"\n    \n    async def rapid_cache_access(worker_id, iterations):\n        cache = caches['default']\n        for i in range(iterations):\n            key = \"worker_{}_iter_{}\".format(worker_id, i)\n            value = \"value_{}\".format(worker_id)\n            cache.set(key, value, timeout=30)\n            retrieved = cache.get(key)\n            if retrieved != value:\n                return (worker_id, False, \"Mismatch at iteration {}\".format(i))\n            await asyncio.sleep(0.0001)  # Tiny delay to allow context switching\n        return (worker_id, True, \"All iterations passed\")\n    \n    # Run multiple workers concurrently\n    workers = [rapid_cache_access(i, 50) for i in range(5)]\n    results = await asyncio.gather(*workers)\n    \n    print(\"\\nRace condition test (rapid concurrent access):\")\n    all_passed = True\n    for worker_id, passed, message in results:\n        status = \"PASS\" if passed else \"FAIL\"\n        print(\"  [{}] Worker {}: {}\".format(status, worker_id, message))\n        if not passed:\n            all_passed = False\n    \n    return all_passed\n\ndef run_async_test(coro):\n    loop = asyncio.get_event_loop()\n    return loop.run_until_complete(coro)\n\nif __name__ == '__main__':\n    print(\"=\"*60)\n    print(\"COMPREHENSIVE ASYNC CACHE SAFETY TESTS\")\n    print(\"=\"*60)\n    print()\n    \n    try:\n        test1_passed = run_async_test(test_concurrent_cache_access())\n        test2_passed = run_async_test(test_cache_isolation_per_context())\n        test3_passed = run_async_test(test_no_race_condition())\n        \n        print(\"\\n\" + \"=\"*60)\n        if test1_passed and test3_passed:\n            print(\"ALL CRITICAL TESTS PASSED\")\n            print(\"Cache is safe for async usage\")\n        else:\n            print(\"SOME TESTS FAILED\")\n            sys.exit(1)\n        print(\"=\"*60)\n    except Exception as e:\n        print(\"\\n[ERROR] Test failed with exception: {}\".format(e))\n        import traceback\n        traceback.print_exc()\n        sys.exit(1)\nEOF\n```",
-    "reward": 0.28701407641599996
+    "reward": 0.659694743552
   },
   {
     "role": "user",
@@ -421,7 +421,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this comprehensive test to verify the fix works correctly in various async scenarios.\n\n```bash\ncd /testbed && python test_comprehensive_async.py\n```",
-    "reward": 0.31169012735999996
+    "reward": 0.76615790592
   },
   {
     "role": "user",
@@ -435,7 +435,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All comprehensive tests pass. The fix is working correctly:\n\n1. Concurrent cache access works properly with different cache aliases\n2. Each async context gets its own cache handler state (10 unique cache dicts for 10 contexts)\n3. No race conditions occur during rapid concurrent access\n\nNow let me verify the changes one more time and prepare for submission.\n\n```bash\ncd /testbed && git diff django/core/cache/__init__.py\n```",
-    "reward": 0.019483545599999992
+    "reward": 0.27692984319999997
   },
   {
     "role": "user",
@@ -449,7 +449,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The changes are minimal and focused:\n\n1. Changed import from `threading.local` to `asgiref.local.Local`\n2. Changed instantiation from `local()` to `Local()`\n3. Updated docstrings to reflect async-safety\n\nLet me check if there are any other references to this code that might need attention.\n\n```bash\ngrep -r \"CacheHandler\" /testbed/django --include=\"*.py\" | grep -v \".pyc\" | grep -v \"test\" | head -20\n```",
-    "reward": 0.03247257599999999
+    "reward": 0.29488307199999997
   },
   {
     "role": "user",
@@ -463,7 +463,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try a different search to see where CacheHandler is used.\n\n```bash\ngrep -r \"CacheHandler\" /testbed/django/core/cache --include=\"*.py\"\n```",
-    "reward": 0.05412095999999999
+    "reward": 0.32480512
   },
   {
     "role": "user",
@@ -477,7 +477,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, CacheHandler is only defined and instantiated in the file we modified. Let me also verify that our changes are consistent with how asgiref.local.Local is used elsewhere in Django by checking one more example.\n\n```bash\ngrep -B 5 -A 10 \"class ConnectionHandler\" /testbed/django/db/utils.py | head -20\n```",
-    "reward": 0.09020159999999998
+    "reward": 0.3746752
   },
   {
     "role": "user",
@@ -491,7 +491,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Interesting! Let me see more of this to understand the pattern better.\n\n```bash\ngrep -A 20 \"class ConnectionHandler:\" /testbed/django/db/utils.py | head -25\n```",
-    "reward": 0.15033599999999997
+    "reward": 0.457792
   },
   {
     "role": "user",
@@ -505,7 +505,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see that ConnectionHandler uses `Local(thread_critical=True)`. Let me check if we should also use this parameter for CacheHandler. Let me look at the asgiref.local.Local documentation or usage to understand when thread_critical should be used.\n\n```bash\npython -c \"from asgiref.local import Local; help(Local.__init__)\" 2>&1 | head -30\n```",
-    "reward": 0.25055999999999995
+    "reward": 0.59632
   },
   {
     "role": "user",
@@ -519,7 +519,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the asgiref source or documentation to understand what thread_critical means.\n\n```bash\npython -c \"from asgiref.local import Local; print(Local.__doc__)\" 2>&1\n```",
-    "reward": 0.41759999999999997
+    "reward": 0.8271999999999999
   },
   {
     "role": "user",
@@ -533,7 +533,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Based on the documentation, `thread_critical=True` is needed for code that truly needs thread-safety and shouldn't share locals across async-to-sync boundaries (like database connections that can't be used from different threads). \n\nFor cache, the backends themselves handle thread-safety, and we want the cache instances to be properly isolated per async context. The default behavior (thread_critical=False) is appropriate for cache because:\n1. Cache backends are designed to be thread-safe\n2. We want proper isolation per async context\n3. We don't have the same strict thread requirements as database connections\n\nOur implementation without thread_critical=True is correct. Let me verify one more time that all tests still pass and then submit.\n\n```bash\ncd /testbed && python tests/runtests.py cache.tests.CacheHandlerTest -v 2 2>&1 | tail -20\n```",
-    "reward": 0.696
+    "reward": 1.212
   },
   {
     "role": "user",
@@ -547,7 +547,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The CacheHandlerTest tests pass. Now let me do a final comprehensive check by running a subset of cache tests to ensure everything works.\n\n```bash\ncd /testbed && python tests/runtests.py cache.tests.LocMemCacheTests -v 1 2>&1 | tail -30\n```",
-    "reward": 0.6599999999999999
+    "reward": 1.02
   },
   {
     "role": "user",
@@ -564,7 +564,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Let me create a final summary document of the changes and then submit.\n\n```bash\ncat <<'EOF' > /testbed/CHANGES_SUMMARY.md\n# Fix for Async Cache Safety Issue\n\n## Problem\nCacheHandler was using `threading.local` instead of `asgiref.local.Local`, which could cause data corruption and race conditions when using caching from async code. The issue is that `threading.local` provides per-thread isolation but not per-async-context isolation, meaning multiple coroutines running in the same thread would share the same cache handler state.\n\n## Solution\nReplaced `threading.local` with `asgiref.local.Local` in `/testbed/django/core/cache/__init__.py`:\n\n1. Changed import: `from threading import local` \u2192 `from asgiref.local import Local`\n2. Changed instantiation: `self._caches = local()` \u2192 `self._caches = Local()`\n3. Updated docstrings to reflect async-safety\n\n## Changes Made\n- File: `django/core/cache/__init__.py`\n  - Line 15: Import changed from threading.local to asgiref.local.Local\n  - Line 64: Instantiation changed from local() to Local()\n  - Line 61: Updated docstring to mention \"per thread or async context\"\n  - Line 94: Updated docstring to mention \"thread-safe and async-safe\"\n\n## Testing\n1. All existing cache tests pass (476 tests, 115 skipped)\n2. Created comprehensive async tests demonstrating:\n   - Proper isolation of cache instances across async contexts\n   - No race conditions during concurrent access\n   - Correct behavior with multiple cache aliases\n\n## Consistency\nThis change is consistent with Django's existing patterns:\n- `django/db/utils.py` uses `asgiref.local.Local` for ConnectionHandler\n- `django/utils/timezone.py` uses `asgiref.local.Local`\n- `django/utils/translation/trans_real.py` uses `asgiref.local.Local`\n- `django/urls/resolvers.py` uses `asgiref.local.Local`\n\n## Backward Compatibility\nThe change is fully backward compatible:\n- All existing synchronous code continues to work exactly as before\n- The API remains unchanged\n- All existing tests pass without modification\nEOF\ncat /testbed/CHANGES_SUMMARY.md\n```",
-    "reward": 0.6
+    "reward": 0.7
   },
   {
     "role": "user",

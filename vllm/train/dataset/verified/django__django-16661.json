@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the PR description.\n\n```bash\nfind /testbed -type f -name \"options.py\" | grep -E \"admin|modeladmin\" | head -20\n```",
-    "reward": 0.01944782398660397
+    "reward": 0.2759277190589609
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the main admin options file. Now let me explore the test directory structure to understand where the modeladmin tests are located.\n\n```bash\nfind /testbed -type d -name \"modeladmin\" | head -10\n```",
-    "reward": 0.03241303997767329
+    "reward": 0.29321286509826816
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect. Let me check the structure of the modeladmin test directory and see what files are there.\n\n```bash\nls -la /testbed/tests/modeladmin/\n```",
-    "reward": 0.05402173329612215
+    "reward": 0.3220214418304469
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me examine the lookup_allowed method in the admin options.py file to understand the current implementation.\n\n```bash\ngrep -n \"def lookup_allowed\" /testbed/django/contrib/admin/options.py\n```",
-    "reward": 0.09003622216020359
+    "reward": 0.37003573638407816
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me view the lookup_allowed method and surrounding context to understand the implementation.\n\n```bash\nnl -ba /testbed/django/contrib/admin/options.py | sed -n '439,500p'\n```",
-    "reward": 0.15006037026700597
+    "reward": 0.4500595606401302
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I understand the issue. The problem is in lines 467-471. The condition checks if `field not in prev_field.path_infos[-1].target_fields`, which is meant to skip fields that are shortcuts (like `id` in `author__id`). However, this also incorrectly skips OneToOneField with primary_key=True that are not parent links (concrete inheritance).\n\nAccording to the analysis, the fix should check if the field is a parent_link to distinguish between:\n1. Concrete inheritance (parent_link=True) - should be skipped\n2. Regular OneToOneField with primary_key=True (parent_link=False) - should NOT be skipped\n\nLet me first create a reproduction script to verify the issue exists.\n\n```bash\ncat <<'EOF' > /testbed/reproduce_issue.py\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\n\n# Define test models\nclass Country(models.Model):\n    name = models.CharField(max_length=256)\n    class Meta:\n        app_label = 'test_app'\n\nclass Place(models.Model):\n    country = models.ForeignKey(Country, models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n\nclass Restaurant(models.Model):\n    place = models.OneToOneField(Place, models.CASCADE, primary_key=True)\n    class Meta:\n        app_label = 'test_app'\n\nclass Waiter(models.Model):\n    restaurant = models.ForeignKey(Restaurant, models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n\n# Define ModelAdmin\nclass WaiterAdmin(ModelAdmin):\n    list_filter = [\n        'restaurant__place__country',\n    ]\n\n# Test the lookup\nma = WaiterAdmin(Waiter, site)\ntry:\n    result = ma.lookup_allowed('restaurant__place__country', 'test_value')\n    print(f\"lookup_allowed result: {result}\")\n    if result:\n        print(\"SUCCESS: Lookup is allowed as expected\")\n    else:\n        print(\"FAILURE: Lookup should be allowed but was rejected\")\nexcept Exception as e:\n    print(f\"ERROR: {e}\")\n    import traceback\n    traceback.print_exc()\nEOF\n```",
-    "reward": 0.00010061711167662734
+    "reward": 0.25009926773355023
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script to confirm the issue exists.\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": 0.00016769518612771224
+    "reward": 0.25016544622258374
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I've confirmed the issue. The lookup is being rejected when it should be allowed. Now let me examine the field structure more closely to understand how to distinguish between parent_link and regular OneToOneField with primary_key=True.\n\n```bash\ncat <<'EOF' > /testbed/debug_fields.py\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\n\n# Test case 1: OneToOneField with primary_key=True (not inheritance)\nclass Country(models.Model):\n    name = models.CharField(max_length=256)\n    class Meta:\n        app_label = 'test_app'\n\nclass Place(models.Model):\n    country = models.ForeignKey(Country, models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n\nclass Restaurant(models.Model):\n    place = models.OneToOneField(Place, models.CASCADE, primary_key=True)\n    class Meta:\n        app_label = 'test_app'\n\n# Test case 2: Concrete inheritance (parent_link)\nclass Animal(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test_app'\n\nclass Dog(Animal):\n    breed = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test_app'\n\n# Examine Restaurant.place field\nplace_field = Restaurant._meta.get_field('place')\nprint(\"Restaurant.place field:\")\nprint(f\"  - is OneToOneField: {isinstance(place_field, models.OneToOneField)}\")\nprint(f\"  - primary_key: {place_field.primary_key}\")\nprint(f\"  - has remote_field: {hasattr(place_field, 'remote_field')}\")\nif hasattr(place_field, 'remote_field') and place_field.remote_field:\n    print(f\"  - remote_field.parent_link: {place_field.remote_field.parent_link}\")\nprint(f\"  - path_infos: {place_field.path_infos}\")\nif place_field.path_infos:\n    print(f\"  - target_fields: {place_field.path_infos[-1].target_fields}\")\n\nprint(\"\\n\" + \"=\"*60 + \"\\n\")\n\n# Examine Dog's parent link field\nparent_link_field = Dog._meta.get_field('animal_ptr')\nprint(\"Dog.animal_ptr field (parent link):\")\nprint(f\"  - is OneToOneField: {isinstance(parent_link_field, models.OneToOneField)}\")\nprint(f\"  - primary_key: {parent_link_field.primary_key}\")\nprint(f\"  - has remote_field: {hasattr(parent_link_field, 'remote_field')}\")\nif hasattr(parent_link_field, 'remote_field') and parent_link_field.remote_field:\n    print(f\"  - remote_field.parent_link: {parent_link_field.remote_field.parent_link}\")\nprint(f\"  - path_infos: {parent_link_field.path_infos}\")\nif parent_link_field.path_infos:\n    print(f\"  - target_fields: {parent_link_field.path_infos[-1].target_fields}\")\nEOF\n```",
-    "reward": 0.0002794919768795204
+    "reward": 0.2502757437043063
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the debug script to see the field properties.\n\n```bash\ncd /testbed && python debug_fields.py\n```",
-    "reward": 0.00046581996146586734
+    "reward": 0.2504595728405104
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! This confirms the analysis. The key difference is:\n- Restaurant.place has `remote_field.parent_link: False` (regular OneToOneField with primary_key=True)\n- Dog.animal_ptr has `remote_field.parent_link: True` (concrete inheritance)\n\nNow let me trace through what happens in lookup_allowed for the failing case to understand the exact issue:\n\n```bash\ncat <<'EOF' > /testbed/trace_lookup.py\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.contrib.admin.options import LOOKUP_SEP\n\n# Define test models\nclass Country(models.Model):\n    name = models.CharField(max_length=256)\n    class Meta:\n        app_label = 'test_app'\n\nclass Place(models.Model):\n    country = models.ForeignKey(Country, models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n\nclass Restaurant(models.Model):\n    place = models.OneToOneField(Place, models.CASCADE, primary_key=True)\n    class Meta:\n        app_label = 'test_app'\n\nclass Waiter(models.Model):\n    restaurant = models.ForeignKey(Restaurant, models.CASCADE)\n    class Meta:\n        app_label = 'test_app'\n\n# Manually trace through lookup_allowed logic\nlookup = 'restaurant__place__country'\nmodel = Waiter\n\nrelation_parts = []\nprev_field = None\n\nprint(f\"Processing lookup: {lookup}\")\nprint(\"=\"*60)\n\nfor part in lookup.split(LOOKUP_SEP):\n    print(f\"\\nProcessing part: '{part}'\")\n    try:\n        field = model._meta.get_field(part)\n        print(f\"  Found field: {field}\")\n        print(f\"  Field type: {type(field).__name__}\")\n        \n        # Check the condition\n        if not prev_field:\n            print(f\"  prev_field is None, adding '{part}' to relation_parts\")\n            relation_parts.append(part)\n        else:\n            print(f\"  prev_field: {prev_field}\")\n            print(f\"  prev_field.is_relation: {prev_field.is_relation}\")\n            if prev_field.is_relation:\n                target_fields = prev_field.path_infos[-1].target_fields\n                print(f\"  target_fields: {target_fields}\")\n                print(f\"  field in target_fields: {field in target_fields}\")\n                \n                # Check parent_link\n                if hasattr(prev_field, 'remote_field') and prev_field.remote_field:\n                    print(f\"  prev_field.remote_field.parent_link: {prev_field.remote_field.parent_link}\")\n                \n                if field not in target_fields:\n                    print(f\"  Condition met: adding '{part}' to relation_parts\")\n                    relation_parts.append(part)\n                else:\n                    print(f\"  Condition NOT met: skipping '{part}'\")\n            else:\n                print(f\"  prev_field is not a relation, adding '{part}' to relation_parts\")\n                relation_parts.append(part)\n        \n        if not getattr(field, \"path_infos\", None):\n            print(f\"  Field has no path_infos, breaking\")\n            break\n        \n        prev_field = field\n        model = field.path_infos[-1].to_opts.model\n        print(f\"  Updated model to: {model}\")\n        \n    except Exception as e:\n        print(f\"  Exception: {e}\")\n        break\n\nprint(\"\\n\" + \"=\"*60)\nprint(f\"Final relation_parts: {relation_parts}\")\nprint(f\"Joined: {LOOKUP_SEP.join(relation_parts)}\")\nEOF\n```",
-    "reward": 0.0007763666024431122
+    "reward": 0.250765954734184
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the trace script to see exactly what's happening.\n\n```bash\ncd /testbed && python trace_lookup.py\n```",
-    "reward": 0.0012939443374051871
+    "reward": 0.25127659122364
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now I can see the exact issue. When processing 'place', the field is in target_fields (because Restaurant.place is a OneToOneField with primary_key=True, so it's in the target_fields of the restaurant ForeignKey). The code skips it, resulting in relation_parts being ['restaurant', 'country'] instead of ['restaurant', 'place', 'country'].\n\nThe fix is to modify the condition on lines 467-471 to only skip the field if it's actually a parent_link (concrete inheritance). Let me now implement the fix:\n\n```bash\ncat <<'EOF' > /testbed/fix.patch\n--- a/django/contrib/admin/options.py\n+++ b/django/contrib/admin/options.py\n@@ -464,9 +464,15 @@ class ModelAdmin(BaseModelAdmin):\n             # It is allowed to filter on values that would be found from local\n             # model anyways. For example, if you filter on employee__department__id,\n             # then the id value would be found already from employee__department_id.\n+            # However, we should not skip OneToOneField with primary_key=True that\n+            # are not parent links (concrete inheritance), as they represent actual\n+            # relationships, not shortcuts.\n             if not prev_field or (\n                 prev_field.is_relation\n                 and field not in prev_field.path_infos[-1].target_fields\n+            ) or (\n+                prev_field and prev_field.is_relation\n+                and field in prev_field.path_infos[-1].target_fields\n+                and hasattr(field, 'remote_field') and field.remote_field and not field.remote_field.parent_link\n             ):\n                 relation_parts.append(part)\n             if not getattr(field, \"path_infos\", None):\nEOF\n```",
-    "reward": 0.002156573895675312
+    "reward": 0.2521276520394
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Wait, I need to reconsider the logic. Looking at the trace output again:\n- When processing 'place', prev_field is 'restaurant' (ForeignKey), and field is 'place' (OneToOneField)\n- The target_fields of restaurant are the fields that restaurant points to, which includes 'place' itself\n- The current code skips 'place' because it's in target_fields\n\nThe fix should check if the current field (not prev_field) is a parent_link. Let me revise:\n\n```bash\ncat <<'EOF' > /testbed/fix_v2.patch\n--- a/django/contrib/admin/options.py\n+++ b/django/contrib/admin/options.py\n@@ -464,9 +464,16 @@ class ModelAdmin(BaseModelAdmin):\n             # It is allowed to filter on values that would be found from local\n             # model anyways. For example, if you filter on employee__department__id,\n             # then the id value would be found already from employee__department_id.\n+            # However, we should not skip OneToOneField with primary_key=True that\n+            # are not parent links (concrete inheritance), as they represent actual\n+            # relationships, not shortcuts.\n             if not prev_field or (\n                 prev_field.is_relation\n-                and field not in prev_field.path_infos[-1].target_fields\n+                and (\n+                    field not in prev_field.path_infos[-1].target_fields\n+                    or (hasattr(field, 'remote_field') and field.remote_field\n+                        and not field.remote_field.parent_link)\n+                )\n             ):\n                 relation_parts.append(part)\n             if not getattr(field, \"path_infos\", None):\nEOF\n```",
-    "reward": 0.00359428982612552
+    "reward": 0.25354608673233336
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me apply this patch and test it. The logic now says: add the part to relation_parts if:\n1. There's no prev_field, OR\n2. prev_field is a relation AND (field is not in target_fields OR field is not a parent_link)\n\nThis means we'll add 'place' even though it's in target_fields, because it's not a parent_link.\n\n```bash\ncd /testbed && patch -p1 < fix_v2.patch\n```",
-    "reward": 0.005990483043542534
+    "reward": 0.25591014455388894
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! The patch was applied. Now let me test if it fixes the issue with our reproduction script.\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": 0.009984138405904223
+    "reward": 0.2598502409231482
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The fix works for the main issue. Now let me verify that it doesn't break other cases. Let me create a comprehensive test script to check:\n1. The original bug case (OneToOneField with primary_key=True, not parent_link)\n2. Concrete inheritance (parent_link=True) - should still be skipped\n3. Regular FK with __id lookup - should still be skipped\n\n```bash\ncat <<'EOF' > /testbed/test_all_cases.py\nimport os\nimport django\nfrom django.conf import settings\n\n# Configure Django settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\n\nprint(\"=\"*70)\nprint(\"TEST 1: OneToOneField with primary_key=True (not parent_link)\")\nprint(\"=\"*70)\n\nclass Country(models.Model):\n    name = models.CharField(max_length=256)\n    class Meta:\n        app_label = 'test1'\n\nclass Place(models.Model):\n    country = models.ForeignKey(Country, models.CASCADE)\n    class Meta:\n        app_label = 'test1'\n\nclass Restaurant(models.Model):\n    place = models.OneToOneField(Place, models.CASCADE, primary_key=True)\n    class Meta:\n        app_label = 'test1'\n\nclass Waiter(models.Model):\n    restaurant = models.ForeignKey(Restaurant, models.CASCADE)\n    class Meta:\n        app_label = 'test1'\n\nclass WaiterAdmin(ModelAdmin):\n    list_filter = ['restaurant__place__country']\n\nma = WaiterAdmin(Waiter, site)\nresult = ma.lookup_allowed('restaurant__place__country', 'test_value')\nprint(f\"lookup_allowed('restaurant__place__country'): {result}\")\nprint(f\"Expected: True, Got: {result}, {'\u2713 PASS' if result else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"TEST 2: Concrete inheritance (parent_link=True)\")\nprint(\"=\"*70)\n\nclass Animal(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass Dog(Animal):\n    breed = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass DogOwner(models.Model):\n    dog = models.ForeignKey(Dog, models.CASCADE)\n    class Meta:\n        app_label = 'test2'\n\nclass DogOwnerAdmin(ModelAdmin):\n    list_filter = ['dog__name']\n\nma2 = DogOwnerAdmin(DogOwner, site)\nresult2 = ma2.lookup_allowed('dog__name', 'test_value')\nprint(f\"lookup_allowed('dog__name'): {result2}\")\nprint(f\"Expected: True, Got: {result2}, {'\u2713 PASS' if result2 else '\u2717 FAIL'}\")\n\n# Also test that dog__animal_ptr__name is NOT allowed (since animal_ptr is not in list_filter)\nresult2b = ma2.lookup_allowed('dog__animal_ptr__name', 'test_value')\nprint(f\"lookup_allowed('dog__animal_ptr__name'): {result2b}\")\nprint(f\"Expected: False, Got: {result2b}, {'\u2713 PASS' if not result2b else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"TEST 3: Regular FK with __id lookup\")\nprint(\"=\"*70)\n\nclass Author(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test3'\n\nclass Book(models.Model):\n    author = models.ForeignKey(Author, models.CASCADE)\n    class Meta:\n        app_label = 'test3'\n\nclass BookAdmin(ModelAdmin):\n    list_filter = ['author']\n\nma3 = BookAdmin(Book, site)\nresult3 = ma3.lookup_allowed('author', 'test_value')\nprint(f\"lookup_allowed('author'): {result3}\")\nprint(f\"Expected: True, Got: {result3}, {'\u2713 PASS' if result3 else '\u2717 FAIL'}\")\n\n# Test that author__id is also allowed (it's a shortcut but should work)\nresult3b = ma3.lookup_allowed('author__id', 'test_value')\nprint(f\"lookup_allowed('author__id'): {result3b}\")\nprint(f\"Expected: True, Got: {result3b}, {'\u2713 PASS' if result3b else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"TEST 4: Nested FK lookups\")\nprint(\"=\"*70)\n\nclass Publisher(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test4'\n\nclass Author2(models.Model):\n    name = models.CharField(max_length=100)\n    publisher = models.ForeignKey(Publisher, models.CASCADE)\n    class Meta:\n        app_label = 'test4'\n\nclass Book2(models.Model):\n    author = models.ForeignKey(Author2, models.CASCADE)\n    class Meta:\n        app_label = 'test4'\n\nclass Book2Admin(ModelAdmin):\n    list_filter = ['author__publisher']\n\nma4 = Book2Admin(Book2, site)\nresult4 = ma4.lookup_allowed('author__publisher', 'test_value')\nprint(f\"lookup_allowed('author__publisher'): {result4}\")\nprint(f\"Expected: True, Got: {result4}, {'\u2713 PASS' if result4 else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"SUMMARY\")\nprint(\"=\"*70)\nall_pass = result and result2 and not result2b and result3 and result3b and result4\nprint(f\"All tests: {'\u2713 PASS' if all_pass else '\u2717 FAIL'}\")\nEOF\n```",
-    "reward": 0.09997356400984038
+    "reward": 0.3497504015385803
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the comprehensive test script to verify all cases work correctly.\n\n```bash\ncd /testbed && python test_all_cases.py\n```",
-    "reward": -4.405998359936989e-05
+    "reward": 0.24958400256430047
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see the issue. Test 2b is failing - `dog__animal_ptr__name` should return False because `animal_ptr` is not in the list_filter, but it's returning True. This is because my fix is now including parent_link fields in relation_parts when they shouldn't be.\n\nLet me trace through what's happening with the parent_link case:\n\n```bash\ncat <<'EOF' > /testbed/trace_parent_link.py\nimport os\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.contrib.admin.options import LOOKUP_SEP\n\nclass Animal(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass Dog(Animal):\n    breed = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass DogOwner(models.Model):\n    dog = models.ForeignKey(Dog, models.CASCADE)\n    class Meta:\n        app_label = 'test2'\n\n# Trace through dog__animal_ptr__name\nlookup = 'dog__animal_ptr__name'\nmodel = DogOwner\n\nrelation_parts = []\nprev_field = None\n\nprint(f\"Processing lookup: {lookup}\")\nprint(\"=\"*60)\n\nfor part in lookup.split(LOOKUP_SEP):\n    print(f\"\\nProcessing part: '{part}'\")\n    try:\n        field = model._meta.get_field(part)\n        print(f\"  Found field: {field}\")\n        print(f\"  Field type: {type(field).__name__}\")\n        \n        if prev_field:\n            print(f\"  prev_field: {prev_field}\")\n            print(f\"  prev_field.is_relation: {prev_field.is_relation}\")\n            if prev_field.is_relation:\n                target_fields = prev_field.path_infos[-1].target_fields\n                print(f\"  target_fields: {target_fields}\")\n                print(f\"  field in target_fields: {field in target_fields}\")\n                \n                if hasattr(field, 'remote_field') and field.remote_field:\n                    print(f\"  field.remote_field.parent_link: {field.remote_field.parent_link}\")\n        \n        if not getattr(field, \"path_infos\", None):\n            print(f\"  Field has no path_infos, breaking\")\n            break\n        \n        prev_field = field\n        model = field.path_infos[-1].to_opts.model\n        print(f\"  Updated model to: {model}\")\n        \n    except Exception as e:\n        print(f\"  Exception: {e}\")\n        break\n\nprint(\"\\n\" + \"=\"*60)\nEOF\n```",
-    "reward": -7.343330599894981e-05
+    "reward": 0.2493066709405008
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this trace to understand the parent_link case better.\n\n```bash\ncd /testbed && python trace_parent_link.py\n```",
-    "reward": -0.00012238884333158303
+    "reward": 0.24884445156750132
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see! When processing 'animal_ptr', the field IS in target_fields AND it has parent_link=True. My current fix adds it to relation_parts because it checks `not field.remote_field.parent_link`, but I want to skip it when parent_link=True.\n\nThe logic should be:\n- Add the part if field is NOT in target_fields, OR\n- Add the part if field IS in target_fields but is NOT a parent_link\n\nSo the condition should be: `field not in target_fields OR not field.remote_field.parent_link`\n\nBut wait, that's what I have. Let me re-read my patch... Ah, I see the issue. My condition is:\n```\nfield not in prev_field.path_infos[-1].target_fields\nor (hasattr(field, 'remote_field') and field.remote_field\n    and not field.remote_field.parent_link)\n```\n\nThis means: add if (field not in target_fields) OR (field is not a parent_link)\n\nBut what I want is: add if (field not in target_fields) OR (field is in target_fields AND not a parent_link)\n\nLet me fix this:\n\n```bash\ncat <<'EOF' > /testbed/view_current_code.py\nwith open('/testbed/django/contrib/admin/options.py', 'r') as f:\n    lines = f.readlines()\n    for i, line in enumerate(lines[466:476], start=467):\n        print(f\"{i}: {line}\", end='')\nEOF\n```",
-    "reward": -0.00020398140555263837
+    "reward": 0.24807408594583552
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me view the current code to see what was applied.\n\n```bash\ncd /testbed && python view_current_code.py\n```",
-    "reward": -0.0003399690092543973
+    "reward": 0.2467901432430592
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see the issue now. The logic `(A or B)` where A is \"field not in target_fields\" and B is \"not parent_link\" means we add the field if EITHER condition is true. But for parent_link fields that ARE in target_fields, both conditions would be:\n- A = False (field IS in target_fields)\n- B = True (it's NOT a parent_link... wait, no, parent_link=True means B=False)\n\nLet me think through this more carefully:\n- For `animal_ptr` (parent_link=True, in target_fields): A=False, B=False \u2192 don't add \u2713 correct\n- For `place` (parent_link=False, in target_fields): A=False, B=True \u2192 add \u2713 correct\n- For `country` (not in target_fields): A=True \u2192 add \u2713 correct\n\nWait, that should work! Let me trace through the actual execution again with the current code:\n\n```bash\ncat <<'EOF' > /testbed/trace_with_fix.py\nimport os\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.contrib.admin.options import LOOKUP_SEP\n\nclass Animal(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass Dog(Animal):\n    breed = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass DogOwner(models.Model):\n    dog = models.ForeignKey(Dog, models.CASCADE)\n    class Meta:\n        app_label = 'test2'\n\nlookup = 'dog__animal_ptr__name'\nmodel = DogOwner\n\nrelation_parts = []\nprev_field = None\n\nprint(f\"Processing lookup: {lookup}\")\nprint(\"=\"*60)\n\nfor part in lookup.split(LOOKUP_SEP):\n    print(f\"\\nProcessing part: '{part}'\")\n    try:\n        field = model._meta.get_field(part)\n        print(f\"  Found field: {field}\")\n        \n        # Apply the logic from the fix\n        should_add = False\n        if not prev_field:\n            should_add = True\n            print(f\"  No prev_field, should add\")\n        elif prev_field.is_relation:\n            target_fields = prev_field.path_infos[-1].target_fields\n            in_target = field in target_fields\n            print(f\"  field in target_fields: {in_target}\")\n            \n            has_remote = hasattr(field, 'remote_field') and field.remote_field\n            is_parent_link = has_remote and field.remote_field.parent_link\n            print(f\"  has remote_field: {has_remote}\")\n            print(f\"  is parent_link: {is_parent_link}\")\n            \n            cond_a = not in_target\n            cond_b = has_remote and not is_parent_link\n            print(f\"  Condition A (not in target): {cond_a}\")\n            print(f\"  Condition B (has remote and not parent_link): {cond_b}\")\n            print(f\"  A or B: {cond_a or cond_b}\")\n            \n            should_add = cond_a or cond_b\n        \n        if should_add:\n            print(f\"  \u2192 Adding '{part}' to relation_parts\")\n            relation_parts.append(part)\n        else:\n            print(f\"  \u2192 NOT adding '{part}'\")\n        \n        if not getattr(field, \"path_infos\", None):\n            break\n        \n        prev_field = field\n        model = field.path_infos[-1].to_opts.model\n        \n    except Exception as e:\n        print(f\"  Exception: {e}\")\n        break\n\nprint(\"\\n\" + \"=\"*60)\nprint(f\"Final relation_parts: {relation_parts}\")\nprint(f\"Joined: {LOOKUP_SEP.join(relation_parts)}\")\nEOF\n```",
-    "reward": -0.0005666150154239955
+    "reward": 0.244650238738432
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this trace to see what's happening.\n\n```bash\ncd /testbed && python trace_with_fix.py\n```",
-    "reward": -0.0009443583590399927
+    "reward": 0.24108373123072
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The logic is working correctly - it's skipping 'animal_ptr' and producing 'dog__name'. So why is the test failing? Let me check what the test is actually checking. The issue is that 'dog__name' IS in the list_filter, so it should return True. But the test expects 'dog__animal_ptr__name' to return False.\n\nWait, I need to re-read the test. The list_filter is `['dog__name']`, and we're checking if `dog__animal_ptr__name` is allowed. After the fix, relation_parts becomes `['dog', 'name']` which joins to `'dog__name'`, which IS in list_filter, so it returns True.\n\nBut the expected behavior is that `dog__animal_ptr__name` should return False because `animal_ptr` is not in the list_filter. However, since `animal_ptr` is a parent_link, it's a shortcut to the parent, so `dog__animal_ptr__name` is equivalent to `dog__name`, which IS in the list_filter.\n\nSo actually, the test expectation is wrong! Let me verify this is the correct Django behavior by checking if this is how it worked before:\n\n```bash\ncat <<'EOF' > /testbed/check_inheritance_behavior.py\nimport os\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\n\nclass Animal(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass Dog(Animal):\n    breed = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass DogOwner(models.Model):\n    dog = models.ForeignKey(Dog, models.CASCADE)\n    class Meta:\n        app_label = 'test2'\n\nclass DogOwnerAdmin(ModelAdmin):\n    list_filter = ['dog__name']\n\nma = DogOwnerAdmin(DogOwner, site)\n\nprint(\"Testing concrete inheritance behavior:\")\nprint(f\"dog__name in list_filter: True\")\nprint(f\"lookup_allowed('dog__name'): {ma.lookup_allowed('dog__name', 'test')}\")\nprint(f\"lookup_allowed('dog__animal_ptr__name'): {ma.lookup_allowed('dog__animal_ptr__name', 'test')}\")\nprint()\nprint(\"This is correct behavior - dog__animal_ptr__name is a shortcut to dog__name\")\nprint(\"since animal_ptr is a parent link (concrete inheritance).\")\nEOF\n```",
-    "reward": -0.0015739305983999878
+    "reward": 0.2351395520512
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run this to verify the behavior.\n\n```bash\ncd /testbed && python check_inheritance_behavior.py\n```",
-    "reward": -0.0026232176639999797
+    "reward": 0.225232586752
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see! So the behavior is actually correct. When you have concrete inheritance, `dog__animal_ptr__name` is equivalent to `dog__name` because `animal_ptr` is just a shortcut to the parent. So if `dog__name` is in list_filter, then `dog__animal_ptr__name` should also be allowed.\n\nMy test expectation was wrong. Let me update the comprehensive test to reflect the correct expected behavior:\n\n```bash\ncat <<'EOF' > /testbed/test_all_cases_v2.py\nimport os\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\n\nprint(\"=\"*70)\nprint(\"TEST 1: OneToOneField with primary_key=True (not parent_link)\")\nprint(\"=\"*70)\n\nclass Country(models.Model):\n    name = models.CharField(max_length=256)\n    class Meta:\n        app_label = 'test1'\n\nclass Place(models.Model):\n    country = models.ForeignKey(Country, models.CASCADE)\n    class Meta:\n        app_label = 'test1'\n\nclass Restaurant(models.Model):\n    place = models.OneToOneField(Place, models.CASCADE, primary_key=True)\n    class Meta:\n        app_label = 'test1'\n\nclass Waiter(models.Model):\n    restaurant = models.ForeignKey(Restaurant, models.CASCADE)\n    class Meta:\n        app_label = 'test1'\n\nclass WaiterAdmin(ModelAdmin):\n    list_filter = ['restaurant__place__country']\n\nma = WaiterAdmin(Waiter, site)\nresult = ma.lookup_allowed('restaurant__place__country', 'test_value')\nprint(f\"lookup_allowed('restaurant__place__country'): {result}\")\nprint(f\"Expected: True, Got: {result}, {'\u2713 PASS' if result else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"TEST 2: Concrete inheritance (parent_link=True)\")\nprint(\"=\"*70)\n\nclass Animal(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass Dog(Animal):\n    breed = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test2'\n\nclass DogOwner(models.Model):\n    dog = models.ForeignKey(Dog, models.CASCADE)\n    class Meta:\n        app_label = 'test2'\n\nclass DogOwnerAdmin(ModelAdmin):\n    list_filter = ['dog__name']\n\nma2 = DogOwnerAdmin(DogOwner, site)\nresult2 = ma2.lookup_allowed('dog__name', 'test_value')\nprint(f\"lookup_allowed('dog__name'): {result2}\")\nprint(f\"Expected: True, Got: {result2}, {'\u2713 PASS' if result2 else '\u2717 FAIL'}\")\n\n# dog__animal_ptr__name should ALSO be allowed since it's equivalent to dog__name\nresult2b = ma2.lookup_allowed('dog__animal_ptr__name', 'test_value')\nprint(f\"lookup_allowed('dog__animal_ptr__name'): {result2b}\")\nprint(f\"Expected: True (shortcut to dog__name), Got: {result2b}, {'\u2713 PASS' if result2b else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"TEST 3: Regular FK with __id lookup\")\nprint(\"=\"*70)\n\nclass Author(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test3'\n\nclass Book(models.Model):\n    author = models.ForeignKey(Author, models.CASCADE)\n    class Meta:\n        app_label = 'test3'\n\nclass BookAdmin(ModelAdmin):\n    list_filter = ['author']\n\nma3 = BookAdmin(Book, site)\nresult3 = ma3.lookup_allowed('author', 'test_value')\nprint(f\"lookup_allowed('author'): {result3}\")\nprint(f\"Expected: True, Got: {result3}, {'\u2713 PASS' if result3 else '\u2717 FAIL'}\")\n\n# Test that author__id is also allowed (it's a shortcut)\nresult3b = ma3.lookup_allowed('author__id', 'test_value')\nprint(f\"lookup_allowed('author__id'): {result3b}\")\nprint(f\"Expected: True, Got: {result3b}, {'\u2713 PASS' if result3b else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"TEST 4: Nested FK lookups\")\nprint(\"=\"*70)\n\nclass Publisher(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test4'\n\nclass Author2(models.Model):\n    name = models.CharField(max_length=100)\n    publisher = models.ForeignKey(Publisher, models.CASCADE)\n    class Meta:\n        app_label = 'test4'\n\nclass Book2(models.Model):\n    author = models.ForeignKey(Author2, models.CASCADE)\n    class Meta:\n        app_label = 'test4'\n\nclass Book2Admin(ModelAdmin):\n    list_filter = ['author__publisher']\n\nma4 = Book2Admin(Book2, site)\nresult4 = ma4.lookup_allowed('author__publisher', 'test_value')\nprint(f\"lookup_allowed('author__publisher'): {result4}\")\nprint(f\"Expected: True, Got: {result4}, {'\u2713 PASS' if result4 else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"TEST 5: OneToOne not in list_filter should be rejected\")\nprint(\"=\"*70)\n\nclass WaiterAdmin2(ModelAdmin):\n    list_filter = ['restaurant__place']  # Only up to place, not country\n\nma5 = WaiterAdmin2(Waiter, site)\nresult5 = ma5.lookup_allowed('restaurant__place__country', 'test_value')\nprint(f\"lookup_allowed('restaurant__place__country') with list_filter=['restaurant__place']: {result5}\")\nprint(f\"Expected: False, Got: {result5}, {'\u2713 PASS' if not result5 else '\u2717 FAIL'}\")\n\nprint(\"\\n\" + \"=\"*70)\nprint(\"SUMMARY\")\nprint(\"=\"*70)\nall_pass = result and result2 and result2b and result3 and result3b and result4 and not result5\nprint(f\"All tests: {'\u2713 PASS' if all_pass else '\u2717 FAIL'}\")\nEOF\n```",
-    "reward": -0.0043720294399999665
+    "reward": 0.20872097792000002
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the updated comprehensive test.\n\n```bash\ncd /testbed && python test_all_cases_v2.py\n```",
-    "reward": -0.17395338239999997
+    "reward": 0.014534963200000015
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass. Now let me run the actual Django test suite for the modeladmin module to make sure we haven't broken anything.\n\n```bash\ncd /testbed && python -m pytest tests/modeladmin/tests.py -xvs\n```",
-    "reward": -0.28992230399999996
+    "reward": -0.142441728
   },
   {
     "role": "user",
@@ -407,7 +407,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me use Django's test runner instead.\n\n```bash\ncd /testbed && python tests/runtests.py modeladmin.tests -v 2\n```",
-    "reward": 0.016796159999999997
+    "reward": 0.26259712
   },
   {
     "role": "user",
@@ -421,7 +421,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! All modeladmin tests pass. Now let me run the admin_filters tests to make sure we haven't broken anything there.\n\n```bash\ncd /testbed && python tests/runtests.py admin_filters -v 2\n```",
-    "reward": 0.027993599999999997
+    "reward": 0.2709952
   },
   {
     "role": "user",
@@ -435,7 +435,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All admin_filters tests pass. Let me also run the admin_changelist tests to be thorough.\n\n```bash\ncd /testbed && python tests/runtests.py admin_changelist -v 2\n```",
-    "reward": 0.046655999999999996
+    "reward": 0.284992
   },
   {
     "role": "user",
@@ -449,7 +449,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me view the final code to make sure it's clean and well-documented, then submit.\n\n```bash\nnl -ba /testbed/django/contrib/admin/options.py | sed -n '464,480p'\n```",
-    "reward": 0.07776
+    "reward": 0.30832000000000004
   },
   {
     "role": "user",
@@ -463,7 +463,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The code looks good. Let me create one final comprehensive test to document the fix and ensure it works correctly for all edge cases before submitting.\n\n```bash\ncat <<'EOF' > /testbed/final_verification.py\n\"\"\"\nFinal verification of the fix for ModelAdmin.lookup_allowed() with foreign key as primary key.\n\nThis script tests the fix for the issue where lookup_allowed() incorrectly raises\nDisallowedModelAdminLookup when using a OneToOneField with primary_key=True that is\nnot a parent link (concrete inheritance).\n\"\"\"\nimport os\nimport django\nfrom django.conf import settings\n\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'django.contrib.admin',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n    django.setup()\n\nfrom django.db import models\nfrom django.contrib.admin import ModelAdmin, site\n\nprint(\"=\"*80)\nprint(\"VERIFICATION OF FIX FOR ONETOONE PRIMARY KEY LOOKUP\")\nprint(\"=\"*80)\n\n# Test case from the bug report\nclass Country(models.Model):\n    name = models.CharField(max_length=256)\n    class Meta:\n        app_label = 'test'\n\nclass Place(models.Model):\n    country = models.ForeignKey(Country, models.CASCADE)\n    class Meta:\n        app_label = 'test'\n\nclass Restaurant(models.Model):\n    place = models.OneToOneField(Place, models.CASCADE, primary_key=True)\n    class Meta:\n        app_label = 'test'\n\nclass Waiter(models.Model):\n    restaurant = models.ForeignKey(Restaurant, models.CASCADE)\n    class Meta:\n        app_label = 'test'\n\nclass WaiterAdmin(ModelAdmin):\n    list_filter = ['restaurant__place__country']\n\nma = WaiterAdmin(Waiter, site)\n\nprint(\"\\n1. Bug Report Test Case:\")\nprint(\"   Models: Waiter -> Restaurant -> Place -> Country\")\nprint(\"   Restaurant.place is OneToOneField with primary_key=True (NOT parent_link)\")\nprint(\"   list_filter = ['restaurant__place__country']\")\nresult = ma.lookup_allowed('restaurant__place__country', 'test_value')\nprint(f\"   lookup_allowed('restaurant__place__country'): {result}\")\nassert result == True, \"FAILED: Should allow lookup through OneToOne primary key\"\nprint(\"   \u2713 PASS: Lookup correctly allowed\")\n\n# Verify concrete inheritance still works\nclass Animal(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test'\n\nclass Dog(Animal):\n    breed = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test'\n\nclass DogOwner(models.Model):\n    dog = models.ForeignKey(Dog, models.CASCADE)\n    class Meta:\n        app_label = 'test'\n\nclass DogOwnerAdmin(ModelAdmin):\n    list_filter = ['dog__name']\n\nma2 = DogOwnerAdmin(DogOwner, site)\n\nprint(\"\\n2. Concrete Inheritance Test:\")\nprint(\"   Models: DogOwner -> Dog (inherits from Animal)\")\nprint(\"   Dog.animal_ptr is OneToOneField with primary_key=True AND parent_link=True\")\nprint(\"   list_filter = ['dog__name']\")\nresult2a = ma2.lookup_allowed('dog__name', 'test')\nprint(f\"   lookup_allowed('dog__name'): {result2a}\")\nassert result2a == True, \"FAILED: Should allow direct lookup\"\nprint(\"   \u2713 PASS: Direct lookup allowed\")\n\nresult2b = ma2.lookup_allowed('dog__animal_ptr__name', 'test')\nprint(f\"   lookup_allowed('dog__animal_ptr__name'): {result2b}\")\nassert result2b == True, \"FAILED: Should allow parent link shortcut\"\nprint(\"   \u2713 PASS: Parent link shortcut correctly allowed (equivalent to dog__name)\")\n\n# Verify FK __id shortcuts still work\nclass Author(models.Model):\n    name = models.CharField(max_length=100)\n    class Meta:\n        app_label = 'test'\n\nclass Book(models.Model):\n    author = models.ForeignKey(Author, models.CASCADE)\n    class Meta:\n        app_label = 'test'\n\nclass BookAdmin(ModelAdmin):\n    list_filter = ['author']\n\nma3 = BookAdmin(Book, site)\n\nprint(\"\\n3. FK __id Shortcut Test:\")\nprint(\"   Models: Book -> Author\")\nprint(\"   list_filter = ['author']\")\nresult3a = ma3.lookup_allowed('author', 'test')\nprint(f\"   lookup_allowed('author'): {result3a}\")\nassert result3a == True, \"FAILED: Should allow FK lookup\"\nprint(\"   \u2713 PASS: FK lookup allowed\")\n\nresult3b = ma3.lookup_allowed('author__id', 'test')\nprint(f\"   lookup_allowed('author__id'): {result3b}\")\nassert result3b == True, \"FAILED: Should allow FK __id shortcut\"\nprint(\"   \u2713 PASS: FK __id shortcut allowed\")\n\nprint(\"\\n\" + \"=\"*80)\nprint(\"ALL TESTS PASSED - FIX VERIFIED\")\nprint(\"=\"*80)\nprint(\"\\nSummary:\")\nprint(\"- OneToOneField with primary_key=True (not parent_link) lookups work correctly\")\nprint(\"- Concrete inheritance (parent_link) shortcuts still work correctly\")\nprint(\"- FK __id shortcuts still work correctly\")\nEOF\n```",
-    "reward": 0.1296
+    "reward": 0.3472
   },
   {
     "role": "user",
@@ -477,7 +477,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me run the final verification script.\n\n```bash\ncd /testbed && python final_verification.py\n```",
-    "reward": 0.216
+    "reward": 0.41200000000000003
   },
   {
     "role": "user",
@@ -491,7 +491,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Let me now clean up the test files I created and prepare to submit the final solution.\n\n```bash\ncd /testbed && rm -f reproduce_issue.py debug_fields.py trace_lookup.py trace_parent_link.py trace_with_fix.py check_inheritance_behavior.py test_all_cases.py test_all_cases_v2.py view_current_code.py final_verification.py fix.patch fix_v2.patch\n```",
-    "reward": 0.36
+    "reward": 0.52
   },
   {
     "role": "user",
@@ -508,7 +508,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me verify the final state of the code change and submit.\n\n```bash\ncd /testbed && git diff django/contrib/admin/options.py\n```",
-    "reward": 0.6
+    "reward": 0.7
   },
   {
     "role": "user",

@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by exploring the repository structure to understand the codebase and locate the relevant files mentioned in the PR description.\n\n```bash\nls -la\n```",
-    "reward": 0.05416810269846652
+    "reward": 0.32216784682587424
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me navigate to the astropy/coordinates directory to find the angles.py file mentioned in the traceback.\n\n```bash\nls -la astropy/coordinates/\n```",
-    "reward": 0.09028017116411087
+    "reward": 0.3702797447097904
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, I found the angles.py file. Let me examine it to understand the current implementation of the Latitude class and its _validate_angles method.\n\n```bash\ncat astropy/coordinates/angles.py\n```",
-    "reward": 0.15046695194018478
+    "reward": 0.45046624118298406
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me look at the specific _validate_angles method in the Latitude class to understand the current implementation better.\n\n```bash\nsed -n '570,590p' astropy/coordinates/angles.py\n```",
-    "reward": 0.0007782532336412911
+    "reward": 0.25077706863830673
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me see the rest of the _validate_angles method to understand the complete validation logic.\n\n```bash\nsed -n '590,610p' astropy/coordinates/angles.py\n```",
-    "reward": 0.0012970887227354852
+    "reward": 0.2512951143971779
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I understand the issue. The validation compares angles.value (which could be float32) against limit (which is computed in float64 precision). When angles.value is float32(pi/2), it's slightly larger than the float64 pi/2, causing the validation to fail.\n\nAccording to the new plan, I should cast the limit to the same dtype as angles.value before comparison. This is the most principled approach. Let me first create a script to reproduce the issue.\n\n```bash\ncat <<'EOF' > reproduce_issue.py\n#!/usr/bin/env python3\n\"\"\"Script to reproduce the float32 Latitude issue.\"\"\"\n\nimport numpy as np\nfrom astropy.coordinates import Latitude\nfrom astropy import units as u\n\nprint(\"Testing float32 pi/2 issue...\")\nprint(f\"np.pi/2 (float64): {np.pi/2}\")\nprint(f\"np.float32(np.pi/2): {np.float32(np.pi/2)}\")\nprint(f\"Difference: {np.float32(np.pi/2) - np.pi/2}\")\n\n# Test case 1: float32 pi/2 in radians\nlat_f32 = np.float32(np.pi/2)\nprint(f\"\\nTest 1: Creating Latitude from float32(pi/2) in radians\")\nprint(f\"Value: {lat_f32}\")\ntry:\n    lat = Latitude(lat_f32, 'rad')\n    print(f\"SUCCESS: {lat}\")\nexcept ValueError as e:\n    print(f\"FAILED: {e}\")\n\n# Test case 2: float32 90 degrees\nlat_f32_deg = np.float32(90.0)\nprint(f\"\\nTest 2: Creating Latitude from float32(90.0) in degrees\")\nprint(f\"Value: {lat_f32_deg}\")\ntry:\n    lat = Latitude(lat_f32_deg, 'deg')\n    print(f\"SUCCESS: {lat}\")\nexcept ValueError as e:\n    print(f\"FAILED: {e}\")\n\n# Test case 3: float32 -pi/2 in radians\nlat_f32_neg = np.float32(-np.pi/2)\nprint(f\"\\nTest 3: Creating Latitude from float32(-pi/2) in radians\")\nprint(f\"Value: {lat_f32_neg}\")\ntry:\n    lat = Latitude(lat_f32_neg, 'rad')\n    print(f\"SUCCESS: {lat}\")\nexcept ValueError as e:\n    print(f\"FAILED: {e}\")\n\n# Test case 4: float32 array with boundary values\nlat_array = np.array([0.0, np.pi/4, np.pi/2], dtype=np.float32)\nprint(f\"\\nTest 4: Creating Latitude from float32 array with pi/2\")\nprint(f\"Values: {lat_array}\")\ntry:\n    lat = Latitude(lat_array, 'rad')\n    print(f\"SUCCESS: {lat}\")\nexcept ValueError as e:\n    print(f\"FAILED: {e}\")\n\nprint(\"\\nAll tests completed.\")\nEOF\n```",
-    "reward": 0.0021618145378924755
+    "reward": 0.2521585239952964
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script to confirm the issue exists.\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": 0.0036030242298207924
+    "reward": 0.2535975399921607
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Interesting! The issue is confirmed for float32(pi/2) in radians (both positive and negative), but float32(90.0) in degrees works fine. The array test also fails but doesn't show the error - let me check that more carefully. The issue is that when converting from radians to degrees for the error message, the float32 precision issue becomes apparent.\n\nNow I need to implement the fix. According to the new plan, I should cast the limit to the same dtype as angles.value before comparison. This is the most principled approach. Let me modify the _validate_angles method.\n\n```bash\ncat <<'EOF' > fix_latitude.py\n#!/usr/bin/env python3\n\"\"\"Script to apply the fix to angles.py\"\"\"\n\nimport sys\n\n# Read the file\nwith open('astropy/coordinates/angles.py', 'r') as f:\n    content = f.read()\n\n# Find and replace the _validate_angles method\nold_code = \"\"\"    def _validate_angles(self, angles=None):\n        \\\"\\\"\\\"Check that angles are between -90 and 90 degrees.\n        If not given, the check is done on the object itself\\\"\\\"\\\"\n        # Convert the lower and upper bounds to the \"native\" unit of\n        # this angle.  This limits multiplication to two values,\n        # rather than the N values in `self.value`.  Also, the\n        # comparison is performed on raw arrays, rather than Quantity\n        # objects, for speed.\n        if angles is None:\n            angles = self\n\n        if angles.unit is u.deg:\n            limit = 90\n        elif angles.unit is u.rad:\n            limit = 0.5 * np.pi\n        else:\n            limit = u.degree.to(angles.unit, 90.0)\n\n        # This invalid catch block can be removed when the minimum numpy\n        # version is >= 1.19 (NUMPY_LT_1_19)\n        with np.errstate(invalid='ignore'):\n            invalid_angles = (np.any(angles.value < -limit) or\n                              np.any(angles.value > limit))\n        if invalid_angles:\n            raise ValueError('Latitude angle(s) must be within -90 deg <= angle <= 90 deg, '\n                             'got {}'.format(angles.to(u.degree)))\"\"\"\n\nnew_code = \"\"\"    def _validate_angles(self, angles=None):\n        \\\"\\\"\\\"Check that angles are between -90 and 90 degrees.\n        If not given, the check is done on the object itself\\\"\\\"\\\"\n        # Convert the lower and upper bounds to the \"native\" unit of\n        # this angle.  This limits multiplication to two values,\n        # rather than the N values in `self.value`.  Also, the\n        # comparison is performed on raw arrays, rather than Quantity\n        # objects, for speed.\n        if angles is None:\n            angles = self\n\n        if angles.unit is u.deg:\n            limit = 90\n        elif angles.unit is u.rad:\n            limit = 0.5 * np.pi\n        else:\n            limit = u.degree.to(angles.unit, 90.0)\n\n        # Cast limit to the same dtype as the angle values to handle\n        # float32 boundary cases where float32(pi/2) slightly exceeds\n        # the float64 representation of pi/2\n        limit = np.asarray(limit, dtype=angles.value.dtype)\n\n        # This invalid catch block can be removed when the minimum numpy\n        # version is >= 1.19 (NUMPY_LT_1_19)\n        with np.errstate(invalid='ignore'):\n            invalid_angles = (np.any(angles.value < -limit) or\n                              np.any(angles.value > limit))\n        if invalid_angles:\n            raise ValueError('Latitude angle(s) must be within -90 deg <= angle <= 90 deg, '\n                             'got {}'.format(angles.to(u.degree)))\"\"\"\n\nif old_code in content:\n    content = content.replace(old_code, new_code)\n    with open('astropy/coordinates/angles.py', 'w') as f:\n        f.write(content)\n    print(\"Fix applied successfully!\")\n    sys.exit(0)\nelse:\n    print(\"ERROR: Could not find the exact code to replace!\")\n    sys.exit(1)\nEOF\npython fix_latitude.py\n```",
-    "reward": 0.006005040383034654
+    "reward": 0.2559958999869345
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The fix has been applied. Now let me verify that the fix works by running the reproduction script again.\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": 0.01000840063839109
+    "reward": 0.2599931666448908
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests now pass. Let me create a more comprehensive test to ensure edge cases are handled correctly, including values that should still be rejected (values beyond the representable boundary for the given dtype).\n\n```bash\ncat <<'EOF' > test_edge_cases.py\n#!/usr/bin/env python3\n\"\"\"Test edge cases for the Latitude fix.\"\"\"\n\nimport numpy as np\nfrom astropy.coordinates import Latitude\nfrom astropy import units as u\n\nprint(\"Testing edge cases for Latitude validation...\")\n\n# Test 1: Values that should be accepted (at boundaries)\nprint(\"\\n=== Test 1: Boundary values that should be ACCEPTED ===\")\ntest_cases_accept = [\n    (np.float32(np.pi/2), 'rad', 'float32(pi/2) radians'),\n    (np.float32(-np.pi/2), 'rad', 'float32(-pi/2) radians'),\n    (np.float32(90.0), 'deg', 'float32(90.0) degrees'),\n    (np.float32(-90.0), 'deg', 'float32(-90.0) degrees'),\n    (np.float64(np.pi/2), 'rad', 'float64(pi/2) radians'),\n    (np.float64(-np.pi/2), 'rad', 'float64(-pi/2) radians'),\n    (np.float64(90.0), 'deg', 'float64(90.0) degrees'),\n    (np.float64(-90.0), 'deg', 'float64(-90.0) degrees'),\n]\n\nfor value, unit, description in test_cases_accept:\n    try:\n        lat = Latitude(value, unit)\n        print(f\"\u2713 {description}: SUCCESS\")\n    except ValueError as e:\n        print(f\"\u2717 {description}: FAILED - {e}\")\n\n# Test 2: Values that should be rejected (beyond boundaries)\nprint(\"\\n=== Test 2: Values that should be REJECTED ===\")\ntest_cases_reject = [\n    (np.float32(np.pi/2) * 1.01, 'rad', 'float32(pi/2 * 1.01) radians'),\n    (np.float32(-np.pi/2) * 1.01, 'rad', 'float32(-pi/2 * 1.01) radians'),\n    (np.float32(91.0), 'deg', 'float32(91.0) degrees'),\n    (np.float32(-91.0), 'deg', 'float32(-91.0) degrees'),\n    (np.float64(np.pi/2) * 1.01, 'rad', 'float64(pi/2 * 1.01) radians'),\n    (np.float64(-np.pi/2) * 1.01, 'rad', 'float64(-pi/2 * 1.01) radians'),\n    (np.float64(91.0), 'deg', 'float64(91.0) degrees'),\n    (np.float64(-91.0), 'deg', 'float64(-91.0) degrees'),\n]\n\nfor value, unit, description in test_cases_reject:\n    try:\n        lat = Latitude(value, unit)\n        print(f\"\u2717 {description}: FAILED - Should have been rejected but was accepted\")\n    except ValueError as e:\n        print(f\"\u2713 {description}: Correctly rejected\")\n\n# Test 3: Arrays with mixed values\nprint(\"\\n=== Test 3: Arrays with boundary values ===\")\ntest_arrays = [\n    (np.array([0.0, np.pi/4, np.pi/2], dtype=np.float32), 'rad', 'float32 array with pi/2'),\n    (np.array([-np.pi/2, 0.0, np.pi/2], dtype=np.float32), 'rad', 'float32 array with \u00b1pi/2'),\n    (np.array([0.0, 45.0, 90.0], dtype=np.float32), 'deg', 'float32 array with 90 deg'),\n    (np.array([-90.0, 0.0, 90.0], dtype=np.float32), 'deg', 'float32 array with \u00b190 deg'),\n]\n\nfor value, unit, description in test_arrays:\n    try:\n        lat = Latitude(value, unit)\n        print(f\"\u2713 {description}: SUCCESS\")\n    except ValueError as e:\n        print(f\"\u2717 {description}: FAILED - {e}\")\n\n# Test 4: Arrays that should be rejected\nprint(\"\\n=== Test 4: Arrays that should be REJECTED ===\")\ntest_arrays_reject = [\n    (np.array([0.0, np.pi/4, np.pi/2 * 1.01], dtype=np.float32), 'rad', 'float32 array with pi/2 * 1.01'),\n    (np.array([0.0, 45.0, 91.0], dtype=np.float32), 'deg', 'float32 array with 91 deg'),\n]\n\nfor value, unit, description in test_arrays_reject:\n    try:\n        lat = Latitude(value, unit)\n        print(f\"\u2717 {description}: FAILED - Should have been rejected but was accepted\")\n    except ValueError as e:\n        print(f\"\u2713 {description}: Correctly rejected\")\n\n# Test 5: Interior values (should always work)\nprint(\"\\n=== Test 5: Interior values (should always work) ===\")\ntest_interior = [\n    (np.float32(0.0), 'rad', 'float32(0.0) radians'),\n    (np.float32(np.pi/4), 'rad', 'float32(pi/4) radians'),\n    (np.float32(45.0), 'deg', 'float32(45.0) degrees'),\n    (np.float64(0.0), 'rad', 'float64(0.0) radians'),\n    (np.float64(np.pi/4), 'rad', 'float64(pi/4) radians'),\n    (np.float64(45.0), 'deg', 'float64(45.0) degrees'),\n]\n\nfor value, unit, description in test_interior:\n    try:\n        lat = Latitude(value, unit)\n        print(f\"\u2713 {description}: SUCCESS\")\n    except ValueError as e:\n        print(f\"\u2717 {description}: FAILED - {e}\")\n\nprint(\"\\n=== All edge case tests completed ===\")\nEOF\npython test_edge_cases.py\n```",
-    "reward": 0.10001400106398516
+    "reward": 0.34998861107481805
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All edge cases pass correctly. The fix properly handles:\n1. Float32 boundary values at \u00b1\u03c0/2 radians and \u00b190 degrees\n2. Float64 boundary values (unchanged behavior)\n3. Values that should be rejected (beyond boundaries) are still rejected\n4. Arrays with boundary values work correctly\n5. Interior values continue to work as expected\n\nNow let me verify the actual change I made to the file to ensure it's clean and correct.\n\n```bash\nsed -n '576,605p' astropy/coordinates/angles.py\n```",
-    "reward": 2.333510664191998e-05
+    "reward": 0.24998101845803009
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The fix looks good. Now let me run the existing test suite for the angles module to ensure we haven't broken anything.\n\n```bash\ncd /testbed && python -m pytest astropy/coordinates/tests/test_angles.py -v\n```",
-    "reward": 3.889184440319997e-05
+    "reward": 0.2499683640967168
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All 83 tests in test_angles.py pass. Now let me run a broader set of coordinate tests to ensure there are no regressions in other parts of the coordinates module.\n\n```bash\ncd /testbed && python -m pytest astropy/coordinates/tests/test_latitude.py -v 2>&1 | head -50\n```",
-    "reward": 6.481974067199995e-05
+    "reward": 0.249947273494528
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: There's no separate test_latitude.py file. Let me check what test files exist in the coordinates tests directory.\n\n```bash\nls -la astropy/coordinates/tests/ | grep test_\n```",
-    "reward": 0.0001080329011199999
+    "reward": 0.24991212249088
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The Latitude tests are in test_angles.py which we already ran successfully. Let me also run a few more coordinate tests to ensure broader compatibility, particularly test_sky_coord.py since it likely uses Latitude extensively.\n\n```bash\ncd /testbed && python -m pytest astropy/coordinates/tests/test_sky_coord.py -v -k \"latitude\" 2>&1 | head -100\n```",
-    "reward": 0.00018005483519999984
+    "reward": 0.2498535374848
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! All the latitude-related tests in test_sky_coord.py pass. Let me also run a quick test on test_frames.py to ensure frame transformations work correctly with the fix.\n\n```bash\ncd /testbed && python -m pytest astropy/coordinates/tests/test_frames.py::test_create_data_frames -v\n```",
-    "reward": 0.00030009139199999973
+    "reward": 0.249755895808
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now let me verify the exact change I made to the source file one more time to ensure it's clean and minimal.\n\n```bash\ncd /testbed && git diff astropy/coordinates/angles.py\n```",
-    "reward": 0.0005001523199999996
+    "reward": 0.24959315968
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The change is clean and minimal. Let me create one final comprehensive test to document the fix and ensure it handles all the cases mentioned in the PR.\n\n```bash\ncat <<'EOF' > final_validation.py\n#!/usr/bin/env python3\n\"\"\"Final validation of the float32 Latitude fix.\"\"\"\n\nimport numpy as np\nfrom astropy.coordinates import Latitude\nfrom astropy import units as u\n\nprint(\"=\" * 70)\nprint(\"FINAL VALIDATION: Float32 Latitude Boundary Fix\")\nprint(\"=\" * 70)\n\n# Test the exact case from the PR description\nprint(\"\\n1. Original PR Issue - float32(pi/2) in radians:\")\nprint(\"-\" * 70)\nlat = np.float32(np.pi/2)\nprint(f\"   Input value: {lat}\")\nprint(f\"   Expected: Should be accepted (was rejected before fix)\")\ntry:\n    result = Latitude(lat, 'rad')\n    print(f\"   Result: \u2713 SUCCESS - {result}\")\nexcept ValueError as e:\n    print(f\"   Result: \u2717 FAILED - {e}\")\n\n# Test negative boundary\nprint(\"\\n2. Negative boundary - float32(-pi/2) in radians:\")\nprint(\"-\" * 70)\nlat = np.float32(-np.pi/2)\nprint(f\"   Input value: {lat}\")\nprint(f\"   Expected: Should be accepted\")\ntry:\n    result = Latitude(lat, 'rad')\n    print(f\"   Result: \u2713 SUCCESS - {result}\")\nexcept ValueError as e:\n    print(f\"   Result: \u2717 FAILED - {e}\")\n\n# Test degrees (should work as before)\nprint(\"\\n3. Float32 90 degrees:\")\nprint(\"-\" * 70)\nlat = np.float32(90.0)\nprint(f\"   Input value: {lat}\")\nprint(f\"   Expected: Should be accepted (worked before fix)\")\ntry:\n    result = Latitude(lat, 'deg')\n    print(f\"   Result: \u2713 SUCCESS - {result}\")\nexcept ValueError as e:\n    print(f\"   Result: \u2717 FAILED - {e}\")\n\n# Test float64 still works\nprint(\"\\n4. Float64 pi/2 in radians:\")\nprint(\"-\" * 70)\nlat = np.float64(np.pi/2)\nprint(f\"   Input value: {lat}\")\nprint(f\"   Expected: Should be accepted (worked before fix)\")\ntry:\n    result = Latitude(lat, 'rad')\n    print(f\"   Result: \u2713 SUCCESS - {result}\")\nexcept ValueError as e:\n    print(f\"   Result: \u2717 FAILED - {e}\")\n\n# Test that out-of-bounds values are still rejected\nprint(\"\\n5. Out-of-bounds value - float32(pi/2 * 1.01):\")\nprint(\"-\" * 70)\nlat = np.float32(np.pi/2 * 1.01)\nprint(f\"   Input value: {lat}\")\nprint(f\"   Expected: Should be rejected\")\ntry:\n    result = Latitude(lat, 'rad')\n    print(f\"   Result: \u2717 FAILED - Should have been rejected: {result}\")\nexcept ValueError as e:\n    print(f\"   Result: \u2713 SUCCESS - Correctly rejected\")\n\n# Test arrays\nprint(\"\\n6. Float32 array with boundary values:\")\nprint(\"-\" * 70)\nlat_array = np.array([-np.pi/2, 0.0, np.pi/2], dtype=np.float32)\nprint(f\"   Input values: {lat_array}\")\nprint(f\"   Expected: Should be accepted\")\ntry:\n    result = Latitude(lat_array, 'rad')\n    print(f\"   Result: \u2713 SUCCESS - {result}\")\nexcept ValueError as e:\n    print(f\"   Result: \u2717 FAILED - {e}\")\n\n# Test mixed precision doesn't break\nprint(\"\\n7. Regular float (default float64) pi/2:\")\nprint(\"-\" * 70)\nlat = np.pi/2\nprint(f\"   Input value: {lat}\")\nprint(f\"   Expected: Should be accepted (worked before fix)\")\ntry:\n    result = Latitude(lat, 'rad')\n    print(f\"   Result: \u2713 SUCCESS - {result}\")\nexcept ValueError as e:\n    print(f\"   Result: \u2717 FAILED - {e}\")\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"VALIDATION COMPLETE\")\nprint(\"=\" * 70)\nEOF\npython final_validation.py\n```",
-    "reward": 0.0008335871999999994
+    "reward": 0.2493219328
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All validation tests pass. Now let me clean up the temporary test files I created and prepare for final submission.\n\n```bash\ncd /testbed && rm -f reproduce_issue.py test_edge_cases.py final_validation.py fix_latitude.py\n```",
-    "reward": 0.001389311999999999
+    "reward": 0.248869888
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good, the temporary files are cleaned up. Now let me verify that only the intended change to angles.py is present and no other files were modified.\n\n```bash\ncd /testbed && git status\n```",
-    "reward": 0.0023155199999999984
+    "reward": 0.24811648
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see that pyproject.toml was also modified. According to the feedback from the previous attempt, I should NOT modify configuration files. Let me check what changed in pyproject.toml and revert it.\n\n```bash\ncd /testbed && git diff pyproject.toml\n```",
-    "reward": 0.0038591999999999975
+    "reward": 0.2468608
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: The pyproject.toml was modified to pin setuptools to version 68.0.0. This is exactly what the feedback warned against - I should not modify configuration files. Let me revert this change.\n\n```bash\ncd /testbed && git checkout pyproject.toml\n```",
-    "reward": 0.006431999999999996
+    "reward": 0.24476799999999999
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me verify that only angles.py is modified.\n\n```bash\ncd /testbed && git status\n```",
-    "reward": 0.010719999999999993
+    "reward": 0.24128
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now only angles.py is modified. Let me verify the change one more time and then run a final quick test to ensure everything still works.\n\n```bash\ncd /testbed && git diff astropy/coordinates/angles.py\n```",
-    "reward": 0.1012
+    "reward": 0.3188
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The change is clean and minimal. Let me run one final quick test to confirm the fix works as expected.\n\n```bash\ncd /testbed && python -c \"import numpy as np; from astropy.coordinates import Latitude; lat = np.float32(np.pi/2); result = Latitude(lat, 'rad'); print(f'SUCCESS: {result}')\"\n```",
-    "reward": 0.252
+    "reward": 0.44799999999999995
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The fix works correctly. Let me also verify that the test suite still passes with a quick run of the angles tests.\n\n```bash\ncd /testbed && python -m pytest astropy/coordinates/tests/test_angles.py::test_latitude -xvs\n```",
-    "reward": 0.42
+    "reward": 0.58
   },
   {
     "role": "user",
@@ -382,7 +382,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Everything is working correctly. Let me create one final comprehensive test to document the fix for posterity, then submit.\n\n```bash\ncat <<'EOF' > /tmp/test_float32_latitude_fix.py\n#!/usr/bin/env python3\n\"\"\"\nTest to verify the float32 Latitude boundary fix.\n\nThis test verifies that the fix for GitHub issue regarding float32 \nrepresentation of pi/2 being rejected by Latitude is working correctly.\n\nThe issue was that float32(pi/2) is slightly larger than the float64 \nrepresentation of pi/2 due to rounding, causing valid boundary values \nto be rejected.\n\nThe fix casts the comparison limit to the same dtype as the input angles,\nensuring that comparisons are done at the appropriate precision level.\n\"\"\"\n\nimport numpy as np\nfrom astropy.coordinates import Latitude\nfrom astropy import units as u\n\ndef test_float32_pi_over_2_radians():\n    \"\"\"Test that float32(pi/2) in radians is accepted.\"\"\"\n    lat = np.float32(np.pi/2)\n    result = Latitude(lat, 'rad')\n    assert result.value == lat\n    print(\"\u2713 float32(pi/2) radians accepted\")\n\ndef test_float32_negative_pi_over_2_radians():\n    \"\"\"Test that float32(-pi/2) in radians is accepted.\"\"\"\n    lat = np.float32(-np.pi/2)\n    result = Latitude(lat, 'rad')\n    assert result.value == lat\n    print(\"\u2713 float32(-pi/2) radians accepted\")\n\ndef test_float32_90_degrees():\n    \"\"\"Test that float32(90.0) degrees is accepted.\"\"\"\n    lat = np.float32(90.0)\n    result = Latitude(lat, 'deg')\n    assert result.value == lat\n    print(\"\u2713 float32(90.0) degrees accepted\")\n\ndef test_float32_negative_90_degrees():\n    \"\"\"Test that float32(-90.0) degrees is accepted.\"\"\"\n    lat = np.float32(-90.0)\n    result = Latitude(lat, 'deg')\n    assert result.value == lat\n    print(\"\u2713 float32(-90.0) degrees accepted\")\n\ndef test_float64_boundaries_still_work():\n    \"\"\"Test that float64 boundaries still work as before.\"\"\"\n    lat_pos = np.float64(np.pi/2)\n    lat_neg = np.float64(-np.pi/2)\n    result_pos = Latitude(lat_pos, 'rad')\n    result_neg = Latitude(lat_neg, 'rad')\n    assert result_pos.value == lat_pos\n    assert result_neg.value == lat_neg\n    print(\"\u2713 float64 boundaries work\")\n\ndef test_out_of_bounds_still_rejected():\n    \"\"\"Test that out-of-bounds values are still rejected.\"\"\"\n    try:\n        Latitude(np.float32(np.pi/2 * 1.01), 'rad')\n        assert False, \"Should have raised ValueError\"\n    except ValueError:\n        pass\n    \n    try:\n        Latitude(np.float32(-np.pi/2 * 1.01), 'rad')\n        assert False, \"Should have raised ValueError\"\n    except ValueError:\n        pass\n    \n    print(\"\u2713 Out-of-bounds values correctly rejected\")\n\ndef test_float32_array_with_boundaries():\n    \"\"\"Test that float32 arrays with boundary values work.\"\"\"\n    lat_array = np.array([-np.pi/2, 0.0, np.pi/2], dtype=np.float32)\n    result = Latitude(lat_array, 'rad')\n    assert np.allclose(result.value, lat_array)\n    print(\"\u2713 float32 arrays with boundaries accepted\")\n\nif __name__ == '__main__':\n    print(\"Testing float32 Latitude boundary fix...\")\n    print(\"-\" * 50)\n    test_float32_pi_over_2_radians()\n    test_float32_negative_pi_over_2_radians()\n    test_float32_90_degrees()\n    test_float32_negative_90_degrees()\n    test_float64_boundaries_still_work()\n    test_out_of_bounds_still_rejected()\n    test_float32_array_with_boundaries()\n    print(\"-\" * 50)\n    print(\"All tests passed!\")\nEOF\npython /tmp/test_float32_latitude_fix.py\n```",
-    "reward": 0.7
+    "reward": 0.8
   },
   {
     "role": "user",

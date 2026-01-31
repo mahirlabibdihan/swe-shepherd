@@ -15,7 +15,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me start by understanding the repository structure and locating the relevant files for JSONField implementation, particularly focusing on SQLite's implementation of the `__contains` and `__contained_by` lookups.\n\n```bash\nfind /testbed -type f -name \"*.py\" | grep -E \"(sqlite|json)\" | head -20\n```",
-    "reward": 0.012230261485746245
+    "reward": 0.26622438065424203
   },
   {
     "role": "user",
@@ -29,7 +29,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me continue searching for the SQLite base.py file which should contain the JSON_CONTAINS implementation mentioned in the previous attempt analysis.\n\n```bash\nfind /testbed -type f -path \"*/sqlite3/base.py\"\n```",
-    "reward": 0.02038376914291041
+    "reward": 0.2770406344237367
   },
   {
     "role": "user",
@@ -43,7 +43,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! Now let me examine the SQLite base.py file to understand the current implementation of `_sqlite_json_contains`.\n\n```bash\ncat /testbed/django/db/backends/sqlite3/base.py\n```",
-    "reward": 0.03397294857151735
+    "reward": 0.29506772403956116
   },
   {
     "role": "user",
@@ -57,7 +57,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see the current implementation of `_sqlite_json_contains` at the end of the file. It only does shallow comparison for dicts (using `target.items() >= candidate.items()`) and equality for everything else. According to the previous attempt analysis and the new plan, I need to implement recursive containment logic that:\n\n1. For dicts: recursively checks that all candidate key/value pairs are contained in the target\n2. For lists: uses multiset semantics where each candidate element must match a distinct element in the target (order-independent)\n\nLet me first look at the test file to understand what behavior is expected:\n\n```bash\ngrep -A 20 \"def test_contains\" /testbed/tests/model_fields/test_jsonfield.py | head -40\n```",
-    "reward": -0.19337841904747108
+    "reward": -0.008220459934064797
   },
   {
     "role": "user",
@@ -71,7 +71,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me check what test data is being used to understand the structure better:\n\n```bash\ngrep -B 30 \"def test_contains\" /testbed/tests/model_fields/test_jsonfield.py | grep -A 30 \"def setUp\"\n```",
-    "reward": -0.3222973650791185
+    "reward": -0.18036743322344134
   },
   {
     "role": "user",
@@ -85,7 +85,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me search for the test setup more broadly:\n\n```bash\ngrep -B 50 \"self.objs\\[7\\]\" /testbed/tests/model_fields/test_jsonfield.py | head -80\n```",
-    "reward": -0.037162275131864174
+    "reward": 0.19938761129426444
   },
   {
     "role": "user",
@@ -99,7 +99,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me find where the test objects are created:\n\n```bash\ngrep -A 20 \"class TestQuerying\" /testbed/tests/model_fields/test_jsonfield.py | head -40\n```",
-    "reward": -0.061937125219773626
+    "reward": 0.16564601882377405
   },
   {
     "role": "user",
@@ -113,7 +113,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me get more of the test data:\n\n```bash\ngrep -A 30 \"class TestQuerying\" /testbed/tests/model_fields/test_jsonfield.py | head -50\n```",
-    "reward": -0.10322854203295605
+    "reward": 0.10941003137295674
   },
   {
     "role": "user",
@@ -127,7 +127,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now I understand the test data structure. Let me create a script to reproduce the issue first, then implement the fix. The test data shows:\n- objs[4] has `{'d': ['e', {'f': 'g'}], ...}` \n- objs[5] has `[1, [2]]`\n- objs[7] has `{'baz': {'a': 'b', 'c': 'd'}, ...}`\n\nAccording to the PR description, these queries should work but currently don't on SQLite:\n- `{'baz': {'a': 'b'}}` should match objs[7] (partial nested dict)\n- `{'d': ['e']}` should match objs[4] (partial nested list)\n- `[1]` should match objs[5] (partial list)\n- `[[2]]` should match objs[5] (nested list element)\n\nLet me create a reproduction script:\n\n```bash\ncat <<'EOF' > /testbed/reproduce_issue.py\nimport os\nimport django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')\ndjango.setup()\n\nfrom django.db import connection\nfrom tests.model_fields.models import NullableJSONModel\n\n# Clear existing data\nNullableJSONModel.objects.all().delete()\n\n# Create test data\nvalues = [\n    None,  # 0\n    [],  # 1\n    {},  # 2\n    {'a': 'b', 'c': 14},  # 3\n    {  # 4\n        'a': 'b',\n        'c': 14,\n        'd': ['e', {'f': 'g'}],\n        'h': True,\n        'i': False,\n        'j': None,\n        'k': {'l': 'm'},\n        'n': [None],\n    },\n    [1, [2]],  # 5\n    {'k': True, 'l': False},  # 6\n    {  # 7\n        'foo': 'bar',\n        'baz': {'a': 'b', 'c': 'd'},\n        'bar': ['foo', 'bar'],\n        'bax': {'foo': 'bar'},\n    },\n]\n\nobjs = [NullableJSONModel.objects.create(value=value) for value in values]\n\nprint(f\"Database vendor: {connection.vendor}\")\nprint()\n\n# Test cases from the PR description\ntest_cases = [\n    ({'baz': {'a': 'b', 'c': 'd'}}, [7], \"Full nested dict\"),\n    ({'baz': {'a': 'b'}}, [7], \"Partial nested dict (key 'a')\"),\n    ({'baz': {'c': 'd'}}, [7], \"Partial nested dict (key 'c')\"),\n    ({'d': ['e', {'f': 'g'}]}, [4], \"Full nested list\"),\n    ({'d': ['e']}, [4], \"Partial nested list\"),\n    ([1, [2]], [5], \"Full list\"),\n    ([1], [5], \"Partial list (first element)\"),\n    ([[2]], [5], \"Partial list (nested element)\"),\n]\n\nprint(\"Testing __contains lookup:\")\nfor query, expected_indices, description in test_cases:\n    qs = NullableJSONModel.objects.filter(value__contains=query)\n    result_indices = [values.index(obj.value) for obj in qs]\n    expected_str = f\"objs[{expected_indices[0]}]\" if len(expected_indices) == 1 else str(expected_indices)\n    result_str = f\"objs[{result_indices[0]}]\" if len(result_indices) == 1 else str(result_indices)\n    status = \"\u2713\" if result_indices == expected_indices else \"\u2717\"\n    print(f\"{status} {description}\")\n    print(f\"  Query: {query}\")\n    print(f\"  Expected: {expected_str}, Got: {result_str}\")\n    if result_indices != expected_indices:\n        print(f\"  FAILED!\")\n    print()\n\n# Clean up\nNullableJSONModel.objects.all().delete()\nEOF\n```",
-    "reward": -0.17204757005492674
+    "reward": 0.01568338562159456
   },
   {
     "role": "user",
@@ -141,7 +141,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run the reproduction script to confirm the issue:\n\n```bash\ncd /testbed && python reproduce_issue.py\n```",
-    "reward": -0.2867459500915446
+    "reward": -0.14052769063067574
   },
   {
     "role": "user",
@@ -155,7 +155,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I need to use the proper Django test settings. Let me check what test settings are available:\n\n```bash\nfind /testbed/tests -name \"*.py\" -path \"*/test_sqlite.py\" | head -5\n```",
-    "reward": 0.022090083180758984
+    "reward": 0.2657871822822071
   },
   {
     "role": "user",
@@ -169,7 +169,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the test_sqlite.py file to see if it has proper settings:\n\n```bash\nhead -30 /testbed/tests/test_sqlite.py\n```",
-    "reward": 0.03681680530126497
+    "reward": 0.27631197047034517
   },
   {
     "role": "user",
@@ -183,7 +183,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me try running the Django tests directly to see the current behavior:\n\n```bash\ncd /testbed && python -m pytest tests/model_fields/test_jsonfield.py::TestQuerying::test_contains -xvs 2>&1 | head -100\n```",
-    "reward": -0.021971991164558384
+    "reward": 0.21051995078390862
   },
   {
     "role": "user",
@@ -197,7 +197,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me use Django's test runner instead:\n\n```bash\ncd /testbed && python tests/runtests.py model_fields.test_jsonfield.TestQuerying.test_contains --settings=test_sqlite -v 2\n```",
-    "reward": -0.03661998527426397
+    "reward": 0.18419991797318105
   },
   {
     "role": "user",
@@ -211,7 +211,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! The test passes currently. Now let me check if there are any tests that specifically test the nested containment cases mentioned in the PR. Let me look at the actual test to see what it's testing:\n\n```bash\ngrep -A 15 \"def test_contains\" /testbed/tests/model_fields/test_jsonfield.py\n```",
-    "reward": -0.06103330879043996
+    "reward": 0.14033319662196841
   },
   {
     "role": "user",
@@ -225,7 +225,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I see - the current test only tests exact matches for nested structures, not partial matches. The PR description shows that these additional test cases should be added (but I won't add them per the constraints). Let me create a simple test script to verify the current behavior and then the fixed behavior:\n\n```bash\ncat <<'EOF' > /testbed/test_nested_contains.py\n#!/usr/bin/env python\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')\nsys.path.insert(0, '/testbed/tests')\ndjango.setup()\n\nfrom django.db import connection\nfrom model_fields.models import NullableJSONModel\n\n# Clear and create test data\nNullableJSONModel.objects.all().delete()\n\ntest_obj_nested_dict = NullableJSONModel.objects.create(\n    value={'baz': {'a': 'b', 'c': 'd'}, 'foo': 'bar'}\n)\ntest_obj_nested_list = NullableJSONModel.objects.create(\n    value={'d': ['e', {'f': 'g'}]}\n)\ntest_obj_list = NullableJSONModel.objects.create(\n    value=[1, [2]]\n)\n\nprint(f\"Testing on {connection.vendor}\")\nprint()\n\n# Test cases from PR description\ntests = [\n    (\"Partial nested dict (key 'a')\", {'baz': {'a': 'b'}}, test_obj_nested_dict),\n    (\"Partial nested dict (key 'c')\", {'baz': {'c': 'd'}}, test_obj_nested_dict),\n    (\"Partial nested list\", {'d': ['e']}, test_obj_nested_list),\n    (\"Partial list (first element)\", [1], test_obj_list),\n    (\"Partial list (nested element)\", [[2]], test_obj_list),\n]\n\nfor description, query, expected_obj in tests:\n    qs = NullableJSONModel.objects.filter(value__contains=query)\n    found = qs.first()\n    status = \"\u2713\" if found == expected_obj else \"\u2717\"\n    print(f\"{status} {description}\")\n    print(f\"  Query: {query}\")\n    print(f\"  Expected: {expected_obj.value}\")\n    print(f\"  Found: {found.value if found else 'None'}\")\n    print()\n\n# Clean up\nNullableJSONModel.objects.all().delete()\nEOF\nchmod +x /testbed/test_nested_contains.py\n```",
-    "reward": -0.10172218131739993
+    "reward": 0.06722199436994733
   },
   {
     "role": "user",
@@ -239,7 +239,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me run this test to see the current behavior:\n\n```bash\ncd /testbed && python test_nested_contains.py\n```",
-    "reward": -0.3362036355289999
+    "reward": -0.22129667605008782
   },
   {
     "role": "user",
@@ -253,7 +253,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I need to check what the proper test settings file looks like. Let me look at the runtests.py to understand how to set up the environment:\n\n```bash\nhead -50 /testbed/tests/runtests.py\n```",
-    "reward": -0.06033939254833315
+    "reward": 0.13117220658318696
   },
   {
     "role": "user",
@@ -267,7 +267,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me just directly test the _sqlite_json_contains function to understand its current behavior:\n\n```bash\ncat <<'EOF' > /testbed/test_json_contains_function.py\nimport json\n\n# Current implementation\ndef _sqlite_json_contains_old(haystack, needle):\n    target, candidate = json.loads(haystack), json.loads(needle)\n    if isinstance(target, dict) and isinstance(candidate, dict):\n        return target.items() >= candidate.items()\n    return target == candidate\n\n# Test cases\ntest_cases = [\n    # (haystack, needle, expected_result, description)\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', True, \"Full nested dict match\"),\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"a\": \"b\"}}', False, \"Partial nested dict (should be True)\"),\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"c\": \"d\"}}', False, \"Partial nested dict (should be True)\"),\n    ('{\"d\": [\"e\", {\"f\": \"g\"}]}', '{\"d\": [\"e\"]}', False, \"Partial nested list (should be True)\"),\n    ('[1, [2]]', '[1]', False, \"Partial list (should be True)\"),\n    ('[1, [2]]', '[[2]]', False, \"Partial list nested (should be True)\"),\n]\n\nprint(\"Testing current implementation:\")\nprint()\nfor haystack, needle, expected, description in test_cases:\n    result = _sqlite_json_contains_old(haystack, needle)\n    status = \"\u2713\" if result == expected else \"\u2717\"\n    print(f\"{status} {description}\")\n    print(f\"  Haystack: {haystack}\")\n    print(f\"  Needle: {needle}\")\n    print(f\"  Expected: {expected}, Got: {result}\")\n    print()\nEOF\npython /testbed/test_json_contains_function.py\n```",
-    "reward": -0.18389898758055526
+    "reward": -0.03137965569468845
   },
   {
     "role": "user",
@@ -281,7 +281,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me fix the encoding issue:\n\n```bash\ncat <<'EOF' > /testbed/test_json_contains_function.py\nimport json\n\n# Current implementation\ndef _sqlite_json_contains_old(haystack, needle):\n    target, candidate = json.loads(haystack), json.loads(needle)\n    if isinstance(target, dict) and isinstance(candidate, dict):\n        return target.items() >= candidate.items()\n    return target == candidate\n\n# Test cases\ntest_cases = [\n    # (haystack, needle, expected_result, description)\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', True, \"Full nested dict match\"),\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"a\": \"b\"}}', False, \"Partial nested dict (should be True)\"),\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"c\": \"d\"}}', False, \"Partial nested dict (should be True)\"),\n    ('{\"d\": [\"e\", {\"f\": \"g\"}]}', '{\"d\": [\"e\"]}', False, \"Partial nested list (should be True)\"),\n    ('[1, [2]]', '[1]', False, \"Partial list (should be True)\"),\n    ('[1, [2]]', '[[2]]', False, \"Partial list nested (should be True)\"),\n]\n\nprint(\"Testing current implementation:\")\nprint()\nfor haystack, needle, expected, description in test_cases:\n    result = _sqlite_json_contains_old(haystack, needle)\n    status = \"PASS\" if result == expected else \"FAIL\"\n    print(\"%s %s\" % (status, description))\n    print(\"  Haystack: %s\" % haystack)\n    print(\"  Needle: %s\" % needle)\n    print(\"  Expected: %s, Got: %s\" % (expected, result))\n    print()\nEOF\npython /testbed/test_json_contains_function.py\n```",
-    "reward": 0.026835020699074553
+    "reward": 0.28103390717551924
   },
   {
     "role": "user",
@@ -295,7 +295,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! This confirms the issue - the current implementation returns False for all the nested containment cases that should return True. Now let me implement the recursive containment logic as described in the new plan. I need to:\n\n1. Implement recursive containment for dicts (all candidate key/value pairs must be recursively contained)\n2. Implement multiset semantics for lists (each candidate element must match a distinct element in the target)\n\nLet me first look at the exact location and context of the function in the base.py file:\n\n```bash\ngrep -n \"_sqlite_json_contains\" /testbed/django/db/backends/sqlite3/base.py\n```",
-    "reward": 0.04472503449845759
+    "reward": 0.30172317862586534
   },
   {
     "role": "user",
@@ -309,7 +309,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now let me look at the context around the function to understand the decorators and structure:\n\n```bash\nsed -n '600,615p' /testbed/django/db/backends/sqlite3/base.py\n```",
-    "reward": 0.07454172416409599
+    "reward": 0.3362052977097756
   },
   {
     "role": "user",
@@ -323,7 +323,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I'll implement the recursive containment logic. Based on the new plan and feedback, I need to:\n\n1. For dicts: recursively check that all candidate key/value pairs are contained in the target\n2. For lists: use multiset semantics where each candidate element must match a distinct element in the target (order-independent)\n\nLet me create the new implementation:\n\n```bash\ncat <<'EOF' > /testbed/test_new_implementation.py\nimport json\n\ndef _sqlite_json_contains_new(haystack, needle):\n    \"\"\"\n    Check if the haystack JSON contains the needle JSON.\n    \n    For dicts: all key/value pairs in needle must be recursively contained in haystack.\n    For lists: each element in needle must be recursively contained by some element in haystack\n              (multiset semantics - each haystack element can only be used once).\n    For primitives: must be equal.\n    \"\"\"\n    def contains_recursive(target, candidate):\n        # If both are dicts, check recursive containment of all candidate keys\n        if isinstance(target, dict) and isinstance(candidate, dict):\n            for key, value in candidate.items():\n                if key not in target:\n                    return False\n                if not contains_recursive(target[key], value):\n                    return False\n            return True\n        \n        # If both are lists, check multiset containment\n        elif isinstance(target, list) and isinstance(candidate, list):\n            # Track which target indices have been used\n            target_used = [False] * len(target)\n            \n            # For each candidate element, find a matching unused target element\n            for candidate_elem in candidate:\n                found_match = False\n                for i, target_elem in enumerate(target):\n                    if not target_used[i] and contains_recursive(target_elem, candidate_elem):\n                        target_used[i] = True\n                        found_match = True\n                        break\n                \n                if not found_match:\n                    return False\n            \n            return True\n        \n        # For primitives, check equality\n        else:\n            return target == candidate\n    \n    try:\n        target = json.loads(haystack)\n        candidate = json.loads(needle)\n        return contains_recursive(target, candidate)\n    except (json.JSONDecodeError, TypeError):\n        return False\n\n# Test cases\ntest_cases = [\n    # (haystack, needle, expected_result, description)\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', True, \"Full nested dict match\"),\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"a\": \"b\"}}', True, \"Partial nested dict (key a)\"),\n    ('{\"baz\": {\"a\": \"b\", \"c\": \"d\"}}', '{\"baz\": {\"c\": \"d\"}}', True, \"Partial nested dict (key c)\"),\n    ('{\"d\": [\"e\", {\"f\": \"g\"}]}', '{\"d\": [\"e\", {\"f\": \"g\"}]}', True, \"Full nested list match\"),\n    ('{\"d\": [\"e\", {\"f\": \"g\"}]}', '{\"d\": [\"e\"]}', True, \"Partial nested list\"),\n    ('[1, [2]]', '[1, [2]]', True, \"Full list match\"),\n    ('[1, [2]]', '[1]', True, \"Partial list (first element)\"),\n    ('[1, [2]]', '[[2]]', True, \"Partial list (nested element)\"),\n    ('{\"a\": \"b\", \"c\": 14}', '{\"a\": \"b\"}', True, \"Simple partial dict\"),\n    ('{\"a\": \"b\"}', '{\"a\": \"b\", \"c\": 14}', False, \"Dict doesn't contain extra keys\"),\n    ('[1, 2, 3]', '[2, 1]', True, \"List order independent\"),\n    ('[1, 1, 2]', '[1, 1]', True, \"List with duplicates (both present)\"),\n    ('[1, 2]', '[1, 1]', False, \"List with duplicates (not enough in target)\"),\n    ('{}', '{}', True, \"Empty dict contains empty dict\"),\n    ('[]', '[]', True, \"Empty list contains empty list\"),\n    ('{\"a\": null}', '{\"a\": null}', True, \"Null value match\"),\n]\n\nprint(\"Testing new implementation:\")\nprint()\npassed = 0\nfailed = 0\nfor haystack, needle, expected, description in test_cases:\n    result = _sqlite_json_contains_new(haystack, needle)\n    status = \"PASS\" if result == expected else \"FAIL\"\n    if result == expected:\n        passed += 1\n    else:\n        failed += 1\n    print(\"%s %s\" % (status, description))\n    print(\"  Haystack: %s\" % haystack)\n    print(\"  Needle: %s\" % needle)\n    print(\"  Expected: %s, Got: %s\" % (expected, result))\n    print()\n\nprint(\"Summary: %d passed, %d failed\" % (passed, failed))\nEOF\npython /testbed/test_new_implementation.py\n```",
-    "reward": 0.12423620694016
+    "reward": 0.3936754961829593
   },
   {
     "role": "user",
@@ -337,7 +337,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The new implementation passes all test cases including the multiset semantics for lists with duplicates. Now I need to update the actual file. Let me create a backup first and then apply the changes:\n\n```bash\ncp /testbed/django/db/backends/sqlite3/base.py /testbed/django/db/backends/sqlite3/base.py.backup\n```",
-    "reward": 0.04039367823359999
+    "reward": 0.32279249363826545
   },
   {
     "role": "user",
@@ -351,7 +351,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I'll replace the _sqlite_json_contains function with the new implementation. I need to be careful to preserve the @none_guard decorator:\n\n```bash\ncat <<'EOF' > /tmp/new_function.py\n@none_guard\ndef _sqlite_json_contains(haystack, needle):\n    \"\"\"\n    Check if the haystack JSON contains the needle JSON.\n    \n    Implements recursive containment following PostgreSQL's @> semantics:\n    - For dicts: all key/value pairs in needle must be recursively contained in haystack.\n    - For lists: each element in needle must be recursively contained by some element\n                 in haystack (multiset semantics - each haystack element can only be used once).\n    - For primitives: must be equal.\n    \"\"\"\n    def contains_recursive(target, candidate):\n        # If both are dicts, check recursive containment of all candidate keys\n        if isinstance(target, dict) and isinstance(candidate, dict):\n            for key, value in candidate.items():\n                if key not in target:\n                    return False\n                if not contains_recursive(target[key], value):\n                    return False\n            return True\n        \n        # If both are lists, check multiset containment\n        elif isinstance(target, list) and isinstance(candidate, list):\n            # Track which target indices have been used\n            target_used = [False] * len(target)\n            \n            # For each candidate element, find a matching unused target element\n            for candidate_elem in candidate:\n                found_match = False\n                for i, target_elem in enumerate(target):\n                    if not target_used[i] and contains_recursive(target_elem, candidate_elem):\n                        target_used[i] = True\n                        found_match = True\n                        break\n                \n                if not found_match:\n                    return False\n            \n            return True\n        \n        # For primitives, check equality\n        else:\n            return target == candidate\n    \n    try:\n        target = json.loads(haystack)\n        candidate = json.loads(needle)\n        return contains_recursive(target, candidate)\n    except (json.JSONDecodeError, TypeError):\n        return False\nEOF\n```",
-    "reward": 0.06732279705599999
+    "reward": 0.3713208227304424
   },
   {
     "role": "user",
@@ -365,7 +365,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Now I need to replace the old function with the new one. Let me use sed to do this carefully. First, let me find the exact line numbers:\n\n```bash\nsed -n '606,612p' /testbed/django/db/backends/sqlite3/base.py\n```",
-    "reward": 0.11220466175999999
+    "reward": 0.452201371217404
   },
   {
     "role": "user",
@@ -379,7 +379,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: I'll delete lines 606-611 (the old function) and insert the new function. Let me do this in steps:\n\n```bash\nsed -i '606,611d' /testbed/django/db/backends/sqlite3/base.py && sed -i '605r /tmp/new_function.py' /testbed/django/db/backends/sqlite3/base.py\n```",
-    "reward": 0.18700776959999998
+    "reward": 0.58700228536234
   },
   {
     "role": "user",
@@ -393,7 +393,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me verify the changes were applied correctly:\n\n```bash\nsed -n '605,660p' /testbed/django/db/backends/sqlite3/base.py\n```",
-    "reward": 0.06167961599999999
+    "reward": 0.3116704756038999
   },
   {
     "role": "user",
@@ -407,7 +407,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The function has been updated. Now let me run the existing Django tests to make sure I haven't broken anything:\n\n```bash\ncd /testbed && python tests/runtests.py model_fields.test_jsonfield.TestQuerying.test_contains --settings=test_sqlite -v 2\n```",
-    "reward": 0.10279935999999999
+    "reward": 0.3527841260064998
   },
   {
     "role": "user",
@@ -421,7 +421,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Great! The test_contains test still passes. Now let me run the test_contained_by test as well since it also uses the JSON_CONTAINS function (with reversed operands):\n\n```bash\ncd /testbed && python tests/runtests.py model_fields.test_jsonfield.TestQuerying.test_contained_by --settings=test_sqlite -v 2\n```",
-    "reward": 0.004665599999999999
+    "reward": 0.2546402100108329
   },
   {
     "role": "user",
@@ -435,7 +435,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! Both tests pass. Now let me run all the JSONField tests to make sure nothing is broken:\n\n```bash\ncd /testbed && python tests/runtests.py model_fields.test_jsonfield --settings=test_sqlite -v 2 2>&1 | tail -50\n```",
-    "reward": 0.007775999999999998
+    "reward": 0.2577336833513882
   },
   {
     "role": "user",
@@ -449,7 +449,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All 72 tests pass with 4 skipped (which is expected for features not supported on SQLite). Now let me create a comprehensive test to verify that the new nested containment functionality works as expected:\n\n```bash\ncat <<'EOF' > /testbed/verify_nested_contains.py\n#!/usr/bin/env python\n\"\"\"\nVerify that nested JSON containment works correctly on SQLite.\nThis tests the cases mentioned in the PR description.\n\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'\nsys.path.insert(0, '/testbed/tests')\n\n# Configure Django settings manually\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'model_fields',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n\ndjango.setup()\n\nfrom django.db import connection\nfrom django.core.management import call_command\nfrom model_fields.models import NullableJSONModel\n\n# Create tables\ncall_command('migrate', '--run-syncdb', verbosity=0)\n\n# Clear and create test data\nNullableJSONModel.objects.all().delete()\n\n# Create test objects matching the test data structure\nvalues = [\n    None,  # 0\n    [],  # 1\n    {},  # 2\n    {'a': 'b', 'c': 14},  # 3\n    {  # 4\n        'a': 'b',\n        'c': 14,\n        'd': ['e', {'f': 'g'}],\n        'h': True,\n        'i': False,\n        'j': None,\n        'k': {'l': 'm'},\n        'n': [None],\n    },\n    [1, [2]],  # 5\n    {'k': True, 'l': False},  # 6\n    {  # 7\n        'foo': 'bar',\n        'baz': {'a': 'b', 'c': 'd'},\n        'bar': ['foo', 'bar'],\n        'bax': {'foo': 'bar'},\n    },\n]\n\nobjs = [NullableJSONModel.objects.create(value=value) for value in values]\n\nprint(\"Testing nested JSON containment on %s\" % connection.vendor)\nprint(\"=\" * 70)\nprint()\n\n# Test cases from the PR description\ntest_cases = [\n    # Existing tests that should still work\n    ({'baz': {'a': 'b', 'c': 'd'}}, [7], \"Full nested dict (existing test)\"),\n    ({'k': True, 'l': False}, [6], \"Simple dict (existing test)\"),\n    ({'d': ['e', {'f': 'g'}]}, [4], \"Full nested list (existing test)\"),\n    ([1, [2]], [5], \"Full list (existing test)\"),\n    ({'n': [None]}, [4], \"List with None (existing test)\"),\n    ({'j': None}, [4], \"Dict with None value (existing test)\"),\n    \n    # New test cases from PR description\n    ({'baz': {'a': 'b'}}, [7], \"Partial nested dict (key 'a') - NEW\"),\n    ({'baz': {'c': 'd'}}, [7], \"Partial nested dict (key 'c') - NEW\"),\n    ({'d': ['e']}, [4], \"Partial nested list - NEW\"),\n    ([1], [5], \"Partial list (first element) - NEW\"),\n    ([[2]], [5], \"Partial list (nested element) - NEW\"),\n]\n\npassed = 0\nfailed = 0\n\nfor query, expected_indices, description in test_cases:\n    qs = NullableJSONModel.objects.filter(value__contains=query)\n    result_objs = list(qs)\n    result_indices = [values.index(obj.value) for obj in result_objs]\n    \n    success = result_indices == expected_indices\n    status = \"PASS\" if success else \"FAIL\"\n    \n    if success:\n        passed += 1\n    else:\n        failed += 1\n    \n    print(\"%s %s\" % (status, description))\n    print(\"  Query: %s\" % query)\n    print(\"  Expected indices: %s\" % expected_indices)\n    print(\"  Got indices: %s\" % result_indices)\n    if not success:\n        print(\"  Expected values: %s\" % [values[i] for i in expected_indices])\n        print(\"  Got values: %s\" % [obj.value for obj in result_objs])\n    print()\n\nprint(\"=\" * 70)\nprint(\"Summary: %d passed, %d failed\" % (passed, failed))\n\nif failed > 0:\n    sys.exit(1)\n\n# Clean up\nNullableJSONModel.objects.all().delete()\nEOF\nchmod +x /testbed/verify_nested_contains.py\npython /testbed/verify_nested_contains.py\n```",
-    "reward": 0.012959999999999998
+    "reward": 0.2628894722523136
   },
   {
     "role": "user",
@@ -463,7 +463,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All tests pass, including the new nested containment cases from the PR description. Now let me also test the `__contained_by` lookup to make sure it works correctly with the new implementation:\n\n```bash\ncat <<'EOF' > /testbed/verify_contained_by.py\n#!/usr/bin/env python\n\"\"\"\nVerify that __contained_by lookup also works with nested structures.\n\"\"\"\nimport os\nimport sys\nimport django\n\n# Setup Django\nos.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'\nsys.path.insert(0, '/testbed/tests')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'model_fields',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n\ndjango.setup()\n\nfrom django.db import connection\nfrom django.core.management import call_command\nfrom model_fields.models import NullableJSONModel\n\n# Create tables\ncall_command('migrate', '--run-syncdb', verbosity=0)\n\n# Clear and create test data\nNullableJSONModel.objects.all().delete()\n\n# Create test objects\ntest_data = [\n    {'a': 'b'},  # 0 - should be contained by larger dicts\n    {'a': 'b', 'c': 14},  # 1 - should be contained by exact or larger\n    [1],  # 2 - should be contained by [1, 2] etc\n    [1, [2]],  # 3 - should be contained by exact match\n    {'baz': {'a': 'b'}},  # 4 - should be contained by larger nested dict\n]\n\nobjs = [NullableJSONModel.objects.create(value=value) for value in test_data]\n\nprint(\"Testing __contained_by lookup on %s\" % connection.vendor)\nprint(\"=\" * 70)\nprint()\n\n# Test cases for contained_by\ntest_cases = [\n    # (query, expected_indices, description)\n    ({'a': 'b', 'c': 14, 'h': True}, [0, 1], \"Simple dict contained by larger\"),\n    ([1, 2, 3], [2], \"Simple list contained by larger\"),\n    ([1, [2], 3], [2, 3], \"List with nested element\"),\n    ({'baz': {'a': 'b', 'c': 'd'}, 'foo': 'bar'}, [4], \"Nested dict contained by larger\"),\n]\n\npassed = 0\nfailed = 0\n\nfor query, expected_indices, description in test_cases:\n    qs = NullableJSONModel.objects.filter(value__contained_by=query)\n    result_objs = list(qs)\n    result_indices = [test_data.index(obj.value) for obj in result_objs]\n    \n    success = sorted(result_indices) == sorted(expected_indices)\n    status = \"PASS\" if success else \"FAIL\"\n    \n    if success:\n        passed += 1\n    else:\n        failed += 1\n    \n    print(\"%s %s\" % (status, description))\n    print(\"  Query (container): %s\" % query)\n    print(\"  Expected indices: %s\" % sorted(expected_indices))\n    print(\"  Got indices: %s\" % sorted(result_indices))\n    if not success:\n        print(\"  Expected values: %s\" % [test_data[i] for i in expected_indices])\n        print(\"  Got values: %s\" % [obj.value for obj in result_objs])\n    print()\n\nprint(\"=\" * 70)\nprint(\"Summary: %d passed, %d failed\" % (passed, failed))\n\nif failed > 0:\n    sys.exit(1)\n\n# Clean up\nNullableJSONModel.objects.all().delete()\nEOF\npython /testbed/verify_contained_by.py\n```",
-    "reward": 0.021599999999999998
+    "reward": 0.271482453753856
   },
   {
     "role": "user",
@@ -477,7 +477,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Both `__contains` and `__contained_by` lookups work correctly with nested structures. Now let me run a broader set of tests to ensure I haven't broken anything else in the model_fields tests:\n\n```bash\ncd /testbed && python tests/runtests.py model_fields --settings=test_sqlite -v 1 2>&1 | tail -20\n```",
-    "reward": 0.036
+    "reward": 0.28580408958976
   },
   {
     "role": "user",
@@ -491,7 +491,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me get the summary of the test run:\n\n```bash\ncd /testbed && python tests/runtests.py model_fields --settings=test_sqlite -v 1 2>&1 | grep -E \"(Ran|OK|FAILED|ERROR)\"\n```",
-    "reward": 0.06
+    "reward": 0.3096734826496
   },
   {
     "role": "user",
@@ -505,7 +505,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All 397 tests in the model_fields module pass with only 6 skipped (which is expected for database-specific features). Now let me create one more comprehensive test to verify edge cases and ensure the implementation is robust:\n\n```bash\ncat <<'EOF' > /testbed/test_edge_cases.py\n#!/usr/bin/env python\n\"\"\"\nTest edge cases for nested JSON containment.\n\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'\nsys.path.insert(0, '/testbed/tests')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'model_fields',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n\ndjango.setup()\n\nfrom django.core.management import call_command\nfrom model_fields.models import NullableJSONModel\n\n# Create tables\ncall_command('migrate', '--run-syncdb', verbosity=0)\n\n# Clear and create test data\nNullableJSONModel.objects.all().delete()\n\nprint(\"Testing edge cases for nested JSON containment\")\nprint(\"=\" * 70)\nprint()\n\n# Test 1: Empty structures\nprint(\"Test 1: Empty structures\")\nobj1 = NullableJSONModel.objects.create(value={})\nobj2 = NullableJSONModel.objects.create(value=[])\nobj3 = NullableJSONModel.objects.create(value={'a': 'b'})\n\nqs = NullableJSONModel.objects.filter(value__contains={})\nassert obj1 in qs and obj3 in qs and obj2 not in qs, \"Empty dict should be contained by any dict\"\nprint(\"  PASS: Empty dict containment\")\n\nqs = NullableJSONModel.objects.filter(value__contains=[])\nassert obj2 in qs and obj1 not in qs and obj3 not in qs, \"Empty list should be contained by any list\"\nprint(\"  PASS: Empty list containment\")\n\nNullableJSONModel.objects.all().delete()\n\n# Test 2: Deeply nested structures\nprint(\"\\nTest 2: Deeply nested structures\")\nobj = NullableJSONModel.objects.create(value={\n    'level1': {\n        'level2': {\n            'level3': {\n                'level4': 'value'\n            }\n        }\n    }\n})\n\nqs = NullableJSONModel.objects.filter(value__contains={'level1': {'level2': {'level3': {'level4': 'value'}}}})\nassert obj in qs, \"Full deep nesting should match\"\nprint(\"  PASS: Full deep nesting\")\n\nqs = NullableJSONModel.objects.filter(value__contains={'level1': {'level2': {'level3': {}}}})\nassert obj in qs, \"Partial deep nesting should match\"\nprint(\"  PASS: Partial deep nesting\")\n\nNullableJSONModel.objects.all().delete()\n\n# Test 3: Lists with duplicates\nprint(\"\\nTest 3: Lists with duplicates\")\nobj = NullableJSONModel.objects.create(value=[1, 1, 2, 3])\n\nqs = NullableJSONModel.objects.filter(value__contains=[1, 1])\nassert obj in qs, \"List with duplicates should match when target has enough\"\nprint(\"  PASS: Duplicate elements present\")\n\nqs = NullableJSONModel.objects.filter(value__contains=[1, 1, 1])\nassert obj not in qs, \"List with more duplicates than target should not match\"\nprint(\"  PASS: Too many duplicate elements\")\n\nNullableJSONModel.objects.all().delete()\n\n# Test 4: Mixed types\nprint(\"\\nTest 4: Mixed types\")\nobj = NullableJSONModel.objects.create(value={\n    'string': 'value',\n    'number': 42,\n    'float': 3.14,\n    'bool': True,\n    'null': None,\n    'list': [1, 2, 3],\n    'dict': {'nested': 'value'}\n})\n\nqs = NullableJSONModel.objects.filter(value__contains={'number': 42, 'bool': True})\nassert obj in qs, \"Multiple types should match\"\nprint(\"  PASS: Multiple types\")\n\nqs = NullableJSONModel.objects.filter(value__contains={'list': [2, 1]})\nassert obj in qs, \"List order independence\"\nprint(\"  PASS: List order independence\")\n\nNullableJSONModel.objects.all().delete()\n\n# Test 5: Type mismatches should not match\nprint(\"\\nTest 5: Type mismatches\")\nobj1 = NullableJSONModel.objects.create(value={'a': 'b'})\nobj2 = NullableJSONModel.objects.create(value=['a', 'b'])\n\nqs = NullableJSONModel.objects.filter(value__contains=['a'])\nassert obj2 in qs and obj1 not in qs, \"List query should not match dict\"\nprint(\"  PASS: List query doesn't match dict\")\n\nqs = NullableJSONModel.objects.filter(value__contains={'a': 'b'})\nassert obj1 in qs and obj2 not in qs, \"Dict query should not match list\"\nprint(\"  PASS: Dict query doesn't match list\")\n\nNullableJSONModel.objects.all().delete()\n\n# Test 6: Nested lists in dicts\nprint(\"\\nTest 6: Nested lists in dicts\")\nobj = NullableJSONModel.objects.create(value={\n    'tags': ['python', 'django', 'json'],\n    'metadata': {'author': 'test'}\n})\n\nqs = NullableJSONModel.objects.filter(value__contains={'tags': ['python', 'django']})\nassert obj in qs, \"Partial list in dict should match\"\nprint(\"  PASS: Partial list in dict\")\n\nqs = NullableJSONModel.objects.filter(value__contains={'tags': ['django', 'python']})\nassert obj in qs, \"Order-independent list in dict should match\"\nprint(\"  PASS: Order-independent list in dict\")\n\nNullableJSONModel.objects.all().delete()\n\nprint(\"\\n\" + \"=\" * 70)\nprint(\"All edge case tests passed!\")\nEOF\npython /testbed/test_edge_cases.py\n```",
-    "reward": 0.1
+    "reward": 0.349455804416
   },
   {
     "role": "user",
@@ -519,7 +519,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! All edge cases pass. Now let me verify that the implementation doesn't affect other database backends by checking if there are any other references to JSON_CONTAINS or similar functions in other backends:\n\n```bash\nfind /testbed/django/db/backends -name \"*.py\" -exec grep -l \"json_contains\\|JSON_CONTAINS\" {} \\;\n```",
-    "reward": 0.0
+    "reward": 0.24909300736
   },
   {
     "role": "user",
@@ -533,7 +533,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! The JSON_CONTAINS function is only defined in the SQLite backend, so my changes are isolated to SQLite and won't affect PostgreSQL, MySQL, or Oracle. Let me also check if there are any lookups that reference this function:\n\n```bash\nfind /testbed/django -name \"*.py\" -exec grep -l \"contains.*lookup\\|contained_by.*lookup\" {} \\; | grep -E \"(lookups|fields)\" | head -10\n```",
-    "reward": 0.0
+    "reward": 0.2484883456
   },
   {
     "role": "user",
@@ -547,7 +547,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Let me check the JSON field lookups to understand how they use the JSON_CONTAINS function:\n\n```bash\ngrep -A 10 \"class.*Contains\" /testbed/django/db/models/fields/json.py\n```",
-    "reward": 0.0
+    "reward": 0.247480576
   },
   {
     "role": "user",
@@ -561,7 +561,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! I can see that the `DataContains` lookup uses `JSON_CONTAINS(%s, %s)` which is the function I modified. Let me also check the ContainedBy lookup:\n\n```bash\ngrep -A 10 \"class.*ContainedBy\" /testbed/django/db/models/fields/json.py\n```",
-    "reward": 0.0
+    "reward": 0.24580096
   },
   {
     "role": "user",
@@ -575,7 +575,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! The `ContainedBy` lookup reverses the operands when calling `JSON_CONTAINS(%s, %s)`, which is exactly what I expected. This means my implementation correctly handles both `__contains` and `__contained_by` lookups.\n\nNow let me create one final comprehensive test to document the behavior and ensure everything works as expected:\n\n```bash\ncat <<'EOF' > /testbed/final_verification.py\n#!/usr/bin/env python\n\"\"\"\nFinal verification that the fix addresses all issues mentioned in the PR.\n\"\"\"\nimport os\nimport sys\nimport django\n\nos.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'\nsys.path.insert(0, '/testbed/tests')\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(\n        DEBUG=True,\n        DATABASES={\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:',\n            }\n        },\n        INSTALLED_APPS=[\n            'django.contrib.contenttypes',\n            'django.contrib.auth',\n            'model_fields',\n        ],\n        SECRET_KEY='test-secret-key',\n    )\n\ndjango.setup()\n\nfrom django.core.management import call_command\nfrom model_fields.models import NullableJSONModel\n\n# Create tables\ncall_command('migrate', '--run-syncdb', verbosity=0)\n\n# Clear and create test data matching the PR description\nNullableJSONModel.objects.all().delete()\n\nprint(\"=\" * 70)\nprint(\"FINAL VERIFICATION - PR Issue Resolution\")\nprint(\"=\" * 70)\nprint()\nprint(\"Issue: JSONField's __contains and __contained_by lookups don't work\")\nprint(\"       with nested values on SQLite.\")\nprint()\nprint(\"The PR description shows these test cases that should work:\")\nprint()\n\n# Create the exact test data from the PR\nvalues = [\n    None,  # 0\n    [],  # 1\n    {},  # 2\n    {'a': 'b', 'c': 14},  # 3\n    {  # 4\n        'a': 'b',\n        'c': 14,\n        'd': ['e', {'f': 'g'}],\n        'h': True,\n        'i': False,\n        'j': None,\n        'k': {'l': 'm'},\n        'n': [None],\n    },\n    [1, [2]],  # 5\n    {'k': True, 'l': False},  # 6\n    {  # 7\n        'foo': 'bar',\n        'baz': {'a': 'b', 'c': 'd'},\n        'bar': ['foo', 'bar'],\n        'bax': {'foo': 'bar'},\n    },\n]\n\nobjs = [NullableJSONModel.objects.create(value=value) for value in values]\n\n# Test cases from the PR diff\npr_test_cases = [\n    # Original tests (should still work)\n    ({}, [2, 3, 4, 6, 7], \"Empty dict\"),\n    ({'baz': {'a': 'b', 'c': 'd'}}, [7], \"Full nested dict (original)\"),\n    ({'k': True, 'l': False}, [6], \"Simple dict (original)\"),\n    ({'d': ['e', {'f': 'g'}]}, [4], \"Full nested list (original)\"),\n    ([1, [2]], [5], \"Full list (original)\"),\n    ({'n': [None]}, [4], \"List with None (original)\"),\n    ({'j': None}, [4], \"Dict with None (original)\"),\n    \n    # NEW tests from PR description that were failing\n    ({'baz': {'a': 'b'}}, [7], \"Partial nested dict - {'a': 'b'} (NEW - was failing)\"),\n    ({'baz': {'c': 'd'}}, [7], \"Partial nested dict - {'c': 'd'} (NEW - was failing)\"),\n    ({'d': ['e']}, [4], \"Partial nested list - ['e'] (NEW - was failing)\"),\n    ([1], [5], \"Partial list - [1] (NEW - was failing)\"),\n    ([[2]], [5], \"Partial list - [[2]] (NEW - was failing)\"),\n]\n\nall_passed = True\nfor query, expected_indices, description in pr_test_cases:\n    qs = NullableJSONModel.objects.filter(value__contains=query)\n    result_objs = list(qs)\n    result_indices = sorted([values.index(obj.value) for obj in result_objs])\n    expected_indices = sorted(expected_indices)\n    \n    success = result_indices == expected_indices\n    status = \"PASS\" if success else \"FAIL\"\n    \n    if not success:\n        all_passed = False\n    \n    marker = \"***\" if \"(NEW\" in description else \"   \"\n    print(\"%s %s %s\" % (marker, status, description))\n    if not success:\n        print(\"       Expected indices: %s\" % expected_indices)\n        print(\"       Got indices: %s\" % result_indices)\n\nprint()\nprint(\"=\" * 70)\nif all_passed:\n    print(\"SUCCESS: All test cases from the PR pass!\")\n    print()\n    print(\"The implementation now correctly handles:\")\n    print(\"  - Nested dict containment (partial key matching)\")\n    print(\"  - Nested list containment (partial element matching)\")\n    print(\"  - Multiset semantics for lists (duplicate handling)\")\n    print(\"  - Order-independent list matching\")\n    print(\"  - Deep nesting at any level\")\nelse:\n    print(\"FAILURE: Some test cases failed\")\n    sys.exit(1)\n\nprint(\"=\" * 70)\n\n# Clean up\nNullableJSONModel.objects.all().delete()\nEOF\npython /testbed/final_verification.py\n```",
-    "reward": 0.0
+    "reward": 0.2430016
   },
   {
     "role": "user",
@@ -589,7 +589,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Let me now verify that the changes don't break anything on other database backends by checking if the tests would still work on PostgreSQL (even though we can't actually run them without a PostgreSQL database). Let me check the PostgreSQL implementation:\n\n```bash\ngrep -A 5 \"postgres_operator = '@>'\" /testbed/django/db/models/fields/json.py\n```",
-    "reward": 0.0
+    "reward": 0.23833600000000002
   },
   {
     "role": "user",
@@ -603,7 +603,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good. PostgreSQL uses its native `@>` operator, so it won't be affected by my changes to the SQLite implementation. Let me create a summary document of the changes:\n\n```bash\ncat <<'EOF' > /testbed/IMPLEMENTATION_SUMMARY.md\n# Implementation Summary: Fix for JSONField Nested Containment on SQLite\n\n## Problem\nSQLite's JSONField `__contains` and `__contained_by` lookups didn't work with nested values. The implementation only performed shallow comparison for dicts and exact equality for other types.\n\n## Root Cause\nThe `_sqlite_json_contains` function in `/testbed/django/db/backends/sqlite3/base.py` used:\n- `target.items() >= candidate.items()` for dicts (shallow comparison)\n- `target == candidate` for everything else (exact equality)\n\nThis didn't support:\n- Partial nested dict matching (e.g., `{'baz': {'a': 'b'}}` should match `{'baz': {'a': 'b', 'c': 'd'}}`)\n- Partial list matching (e.g., `[1]` should match `[1, [2]]`)\n- Nested list element matching (e.g., `[[2]]` should match `[1, [2]]`)\n\n## Solution\nImplemented recursive containment logic following PostgreSQL's `@>` semantics:\n\n### For Dictionaries\nRecursively check that all key/value pairs in the candidate are contained in the target:\n- All candidate keys must exist in target\n- Each candidate value must be recursively contained by the corresponding target value\n\n### For Lists\nImplement multiset semantics where each candidate element must match a distinct target element:\n- Order-independent matching\n- Each target element can only be used once (handles duplicates correctly)\n- Recursive matching for nested structures\n\n### For Primitives\nUse equality comparison\n\n## Changes Made\nModified `/testbed/django/db/backends/sqlite3/base.py`:\n- Replaced the `_sqlite_json_contains` function with a recursive implementation\n- Added comprehensive docstring explaining the semantics\n- Preserved the `@none_guard` decorator for NULL handling\n- Added try/except for JSON decoding errors\n\n## Test Results\n- All 72 JSONField tests pass (4 skipped for unsupported features)\n- All 397 model_fields tests pass (6 skipped)\n- New test cases from PR description all pass:\n  - `{'baz': {'a': 'b'}}` matches `{'baz': {'a': 'b', 'c': 'd'}}`\n  - `{'baz': {'c': 'd'}}` matches `{'baz': {'a': 'b', 'c': 'd'}}`\n  - `{'d': ['e']}` matches `{'d': ['e', {'f': 'g'}]}`\n  - `[1]` matches `[1, [2]]`\n  - `[[2]]` matches `[1, [2]]`\n\n## Edge Cases Handled\n- Empty dicts/lists\n- Deeply nested structures\n- Lists with duplicates (multiset semantics)\n- Mixed types\n- Type mismatches (dict vs list)\n- NULL values\n- Order-independent list matching\n\n## Backward Compatibility\n- All existing tests pass\n- Only affects SQLite backend\n- PostgreSQL, MySQL, and Oracle backends unchanged\n- Behavior now matches PostgreSQL's JSONB `@>` operator semantics\nEOF\ncat /testbed/IMPLEMENTATION_SUMMARY.md\n```",
-    "reward": 0.0
+    "reward": 0.23056000000000001
   },
   {
     "role": "user",
@@ -617,7 +617,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! Now let me verify the final state of the modified file one more time to ensure everything is correct:\n\n```bash\nsed -n '606,660p' /testbed/django/db/backends/sqlite3/base.py\n```",
-    "reward": 0.0
+    "reward": 0.21760000000000002
   },
   {
     "role": "user",
@@ -631,7 +631,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Excellent! The implementation looks correct. Let me run one final comprehensive test to make sure everything works:\n\n```bash\ncd /testbed && python tests/runtests.py model_fields.test_jsonfield --settings=test_sqlite -v 1 2>&1 | grep -E \"(Ran|OK|FAILED|ERROR|test_contains|test_contained_by)\"\n```",
-    "reward": 0.0
+    "reward": 0.196
   },
   {
     "role": "user",
@@ -648,7 +648,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Perfect! All tests pass. Now let me check if there are any other files that might need to be reviewed or if there are any imports that need to be verified:\n\n```bash\nhead -30 /testbed/django/db/backends/sqlite3/base.py | grep import\n```",
-    "reward": 0.0
+    "reward": 0.16
   },
   {
     "role": "user",
@@ -665,7 +665,7 @@
   {
     "role": "assistant",
     "content": "THOUGHT: Good! The `json` module is already imported, so my implementation doesn't require any new imports. Everything is in place. Let me now submit the final solution:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
-    "reward": 0.0
+    "reward": 0.1
   },
   {
     "role": "user",
