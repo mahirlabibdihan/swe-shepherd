@@ -38,7 +38,7 @@ class AgentConfig:
     action_regex: str = r"```bash\s*\n(.*?)\n```"
     step_limit: int = 0
     cost_limit: float = 3.0
-    n_actions: int = 3
+    n_actions: int = 1
 
 
 class NonTerminatingException(Exception):
@@ -122,9 +122,9 @@ class DefaultAgent:
                 if score > max_score:
                     max_score = score
                     best_response = response
-                
-            output = self.get_observation(best_response)
+            
             self.add_message("assistant", **best_response)
+            output = self.get_observation(best_response)
             return output
 
     def query(self) -> dict:
