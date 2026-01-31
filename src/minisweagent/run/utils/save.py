@@ -61,6 +61,7 @@ def save_traj(
         data["info"]["model_stats"]["instance_cost"] = agent.model.cost
         data["info"]["model_stats"]["api_calls"] = agent.model.n_calls
         data["messages"] = agent.messages
+        data["tree"] = agent.tree
         data["info"]["config"] = {
             "agent": _asdict(agent.config),
             "model": _asdict(agent.model.config),

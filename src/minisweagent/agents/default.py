@@ -74,6 +74,7 @@ class DefaultAgent:
         self.extra_template_vars = {}
         self.n_history = 0
         self.n_steps = 0
+        self.tree = []
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -82,6 +83,8 @@ class DefaultAgent:
         )
 
     def add_message(self, role: str, content: str, **kwargs):
+        if role == "user" or role == "system":
+            self.tree.append({"role": role, "content": content, "timestamp": time.time()})
         self.messages.append({"role": role, "content": content, "timestamp": time.time(), **kwargs})
 
     def run(self, task: str, **kwargs) -> tuple[str, str]:
@@ -91,6 +94,8 @@ class DefaultAgent:
         self.add_message("system", self.render_template(self.config.system_template))
         self.add_message("user", self.render_template(self.config.instance_template))
         self.n_history = 0
+        self.n_steps = 0
+        self.tree = []
         while True:
             try:
                 self.step()
@@ -106,10 +111,12 @@ class DefaultAgent:
         if self.config.n_actions == 1:
             response = self.query()
             self.add_message("assistant", **response)
+            self.tree.append({"role": "assistant", "content": response["content"], "timestamp": time.time()})
             return self.get_observation(response)
         else:
             best_response = None
             max_score = float('-inf')
+            candidates = []
             for _ in range(self.config.n_actions):
                 response = self.query()
                 output = requests.post(os.environ["REWARD_MODEL_SERVER"] + "/v1/score", json={
@@ -118,11 +125,15 @@ class DefaultAgent:
                     "action": response["content"]
                 })
                 score = output.json().get("score", 0.0)
+                candidates.append((response, score))
                 # print(f"Action score #{_+1}: {score}")
                 if score > max_score:
                     max_score = score
                     best_response = response
             
+            for resp, score in candidates:
+                self.tree.append({"role": "assistant", "content": resp["content"], "reward": score, "timestamp": time.time()})
+                
             self.add_message("assistant", **best_response)
             output = self.get_observation(best_response)
             return output
