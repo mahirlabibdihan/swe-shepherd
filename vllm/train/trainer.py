@@ -50,6 +50,7 @@ class PRMDataset(Dataset):
 
     @classmethod
     def format(cls, task, history, action, offset):
+        
         parts = []
         parts.append(f"[Problem Statement]\n{task}")
         # Truncation notice
@@ -219,10 +220,22 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, collate_fn=collate)
     val_loader = DataLoader(val_ds, batch_size=2, shuffle=False, collate_fn=collate)
 
+    
 
     model = PRM(MODEL).cuda()
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
     criterion = nn.MSELoss()
+    
+    from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.3,
+        patience=1,
+        min_lr=1e-6,
+        verbose=True
+    )
 
     from tqdm import tqdm
     import torch.nn.functional as F
@@ -279,9 +292,17 @@ def main():
                 val_loader_tqdm.set_postfix({"val_loss": f"{avg_val_so_far:.4f}"})
 
         avg_val_loss = running_val_loss / len(val_loader)
+        
+        scheduler.step(avg_val_loss)
+        
         val_losses.append(avg_val_loss)
 
-        print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        print(
+            f"Epoch {epoch+1}/{num_epochs} "
+            f"- Train Loss: {avg_train_loss:.4f} "
+            f"| Val Loss: {avg_val_loss:.4f} "
+            f"| LR: {optimizer.param_groups[0]['lr']:.2e}"
+        )
         
         
     
