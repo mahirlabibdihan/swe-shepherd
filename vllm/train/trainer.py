@@ -230,6 +230,9 @@ def main():
     train_losses, val_losses = [], []
 
     for epoch in range(num_epochs):
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
         # -------- TRAIN --------
         model.train()
         running_train_loss = 0.0
@@ -277,6 +280,8 @@ def main():
         val_losses.append(avg_val_loss)
 
         print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        
+        
     
     # Save the model
     model.save("prm_ckpt")
