@@ -95,7 +95,11 @@ class DefaultAgent:
         self.add_message("user", self.render_template(self.config.instance_template))
         self.n_history = 0
         self.n_steps = 0
-        self.tree = [self.messages[1]]
+        self.tree = [{
+            "role": "user",
+            "content": self.extra_template_vars["task"],
+            "timestamp": time.time()
+        }]
         while True:
             try:
                 self.step()
