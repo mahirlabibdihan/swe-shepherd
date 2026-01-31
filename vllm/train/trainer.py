@@ -117,14 +117,6 @@ class PRM(nn.Module):
             device_map="auto"
         )
         
-        lora = LoraConfig(
-            r=8,
-            lora_alpha=16,
-            target_modules=["q_proj", "v_proj"],
-            lora_dropout=0.05,
-            task_type="CAUSAL_LM"
-        )
-        
         if load_lora:
             lora = LoraConfig(
                 r=8,
