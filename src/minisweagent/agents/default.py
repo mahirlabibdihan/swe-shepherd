@@ -135,7 +135,7 @@ class DefaultAgent:
                     max_score = score
                     best_response = response
             
-            self.tree.append({"role": "assistant", "content": best_response["content"], "timestamp": time.time(), "candidates": candidates})
+            self.tree.append({"role": "assistant", "content": best_response["content"],  "candidates": candidates})
             self.add_message("assistant", **best_response)
             output = self.get_observation(best_response)
             return output
