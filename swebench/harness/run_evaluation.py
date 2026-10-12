@@ -378,7 +378,7 @@ def get_dataset_from_preds(
     predictions: dict,
     run_id: str,
     rewrite_reports: bool,
-    exclude_completed: bool = True,
+    exclude_completed: bool = False,
 ):
     """
     Return only instances that have predictions and are in the dataset.
@@ -399,13 +399,13 @@ def get_dataset_from_preds(
 
     # check that all prediction IDs are in the dataset
     prediction_ids = set(predictions.keys())
-    if prediction_ids - dataset_ids:
-        raise ValueError(
-            (
-                "Some prediction IDs not found in dataset!"
-                f"\nMissing IDs:\n{' '.join(prediction_ids - dataset_ids)}"
-            )
-        )
+    extra_prediction_ids = prediction_ids - dataset_ids
+    if extra_prediction_ids:
+        # print(
+        #     "Warning: Ignoring prediction IDs not found in dataset: "
+        #     f"{' '.join(sorted(extra_prediction_ids))}"
+        # )
+        prediction_ids -= extra_prediction_ids
     if instance_ids:
         dataset = [i for i in dataset if i[KEY_INSTANCE_ID] in instance_ids]
 

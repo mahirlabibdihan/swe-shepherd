@@ -24,20 +24,29 @@ class RewardModel:
                 act_obs.append(old_step)
                 old_step = {}
             
-            
-        text = PRMDataset.format(task, act_obs, action, len(act_obs) - 2)
-        inputs = self.tokenizer(
-            text,
-            return_tensors="pt",
-            padding=True,
-            # truncation=True,
-            # max_length=1024,
-        )
+        n_history = 2
+        while True:
+            text = PRMDataset.format(task, act_obs[-n_history:], action, len(act_obs) - n_history)
+            try:
+                inputs = self.tokenizer(
+                    text,
+                    return_tensors="pt",
+                    padding=True,
+                    # truncation=True,
+                    # max_length=1024,
+                )
 
-        input_ids = inputs["input_ids"].cuda()
-        attention_mask = inputs["attention_mask"].cuda()
+                input_ids = inputs["input_ids"].cuda()
+                attention_mask = inputs["attention_mask"].cuda()
 
-        with torch.no_grad():
-            scores = self.model(input_ids, attention_mask)
+                with torch.no_grad():
+                    scores = self.model(input_ids, attention_mask)
+                
+                break
+            except Exception as e:
+                n_history -= 1
+                if n_history < 0:
+                    raise e
+                continue
 
         return scores[0].item()

@@ -61,7 +61,7 @@ class ProgressTrackingAgent(DefaultAgent):
     def step(self) -> dict:
         """Override step to provide progress updates."""
         self.progress_manager.update_instance_status(
-            self.instance_id, f"Step {self.model.n_calls + 1:3d} (${self.model.cost:.2f})"
+            self.instance_id, f"Step {self.n_steps + 1:3d} (${self.model.cost:.2f})"
         )
         return super().step()
 
@@ -216,9 +216,10 @@ def main(
 
     instances = filter_instances(instances, filter_spec=filter_spec, slice_spec=slice_spec, shuffle=shuffle)
     if not redo_existing and (output_path / "preds.json").exists():
-        existing_instances = list(json.loads((output_path / "preds.json").read_text()).keys())
+        preds = json.loads((output_path / "preds.json").read_text())
+        existing_instances = list(preds.keys())
         logger.info(f"Skipping {len(existing_instances)} existing instances")
-        instances = [instance for instance in instances if instance["instance_id"] not in existing_instances]
+        instances = [instance for instance in instances if instance["instance_id"] not in existing_instances or preds[instance["instance_id"]]["model_patch"].strip() == ""]
     logger.info(f"Running on {len(instances)} instances...")
 
     config_path = get_config_path(config_spec)

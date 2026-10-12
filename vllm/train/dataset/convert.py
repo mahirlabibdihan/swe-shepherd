@@ -42,8 +42,6 @@ def convert_to_axolotl_regression(steps, k=5):
              
     return axolotl_data
 
-
-
 def extract_prm_steps(example):
     steps = []
     history = []

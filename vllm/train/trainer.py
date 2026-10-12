@@ -72,10 +72,12 @@ class PRMDataset(Dataset):
 
     def __getitem__(self, idx):
         text, label = self.samples[idx]
+
         enc = self.tok(
             text,
             truncation=True,
             max_length=self.max_len,
+            add_special_tokens=True,
             return_tensors="pt"
         )
         return {
